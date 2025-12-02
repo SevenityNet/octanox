@@ -35,6 +35,11 @@ func (r *SubRouter) Router(url string) *SubRouter {
 	}
 }
 
+// Gin returns the underlying Gin router group for adding middleware
+func (r *SubRouter) Gin() *gin.RouterGroup {
+	return r.gin
+}
+
 // RegisterManually registers a new route handler. The function automatically detects the method, request and response type. If any of these detection fails, it will panic.
 func (r *SubRouter) RegisterManually(path string, handler interface{}, authenticated bool, roles ...string) {
 	handlerType := reflect.TypeOf(handler)

@@ -135,14 +135,18 @@ func wrapHandler(c *gin.Context, reqType reflect.Type, handler reflect.Value, au
 
 		if authenticated {
 			if len(roles) > 0 {
+				hasRequiredRole := false
 				for _, role := range roles {
 					if user.HasRole(role) {
+						hasRequiredRole = true
 						break
 					}
 				}
 
-				c.JSON(403, gin.H{"error": "forbidden"})
-				return
+				if !hasRequiredRole {
+					c.JSON(403, gin.H{"error": "forbidden"})
+					return
+				}
 			}
 		}
 	}

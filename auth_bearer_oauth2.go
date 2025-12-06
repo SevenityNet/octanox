@@ -2,6 +2,7 @@ package octanox
 
 import (
 	"context"
+	"net/http"
 	"strings"
 	"time"
 
@@ -23,6 +24,13 @@ type OAuth2BearerAuthenticator struct {
 	// Optional OIDC ID token validation
 	validateIDToken bool
 	oidcIssuer      string
+	// Cookie-based auth settings
+	useCookies   bool
+	cookieName   string
+	cookieDomain string
+	cookieSecure bool
+	// Reference to the Instance for tracking cookie auth state
+	instance *Instance
 }
 
 // SetExp sets the expiration time for the token.
@@ -35,12 +43,28 @@ func (a *OAuth2BearerAuthenticator) Method() AuthenticationMethod {
 }
 
 func (a *OAuth2BearerAuthenticator) Authenticate(c *gin.Context) (User, error) {
-	token := c.GetHeader("Authorization")
-	if token == "" {
+	var tokenString string
+
+	// If cookie auth is enabled, check cookie first
+	if a.useCookies {
+		if cookie, err := c.Cookie(a.cookieName); err == nil && cookie != "" {
+			tokenString = cookie
+		}
+	}
+
+	// Fall back to Authorization header (for API clients and backwards compatibility)
+	if tokenString == "" {
+		header := c.GetHeader("Authorization")
+		if header != "" && len(header) > 7 && strings.HasPrefix(header, "Bearer ") {
+			tokenString = header[7:]
+		}
+	}
+
+	if tokenString == "" {
 		return nil, nil
 	}
 
-	userID := a.extractToken(token[7:])
+	userID := a.extractToken(tokenString)
 	if userID == nil {
 		return nil, nil
 	}
@@ -128,18 +152,74 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 		panic("octanox: failed to create token")
 	}
 
+	// Cookie-based auth: set HTTP-only cookie and redirect without token in URL
+	if a.useCookies {
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(
+			a.cookieName,   // name
+			jwt,            // value
+			int(a.exp),     // max age in seconds
+			"/",            // path
+			a.cookieDomain, // domain
+			a.cookieSecure, // secure (HTTPS only)
+			true,           // httpOnly (not accessible via JavaScript)
+		)
+		c.Redirect(302, a.loginSuccessRedirect)
+		return
+	}
+
+	// Bearer token auth: pass token in URL (legacy behavior)
 	c.Redirect(302, a.loginSuccessRedirect+"?token="+jwt)
 }
 
 func (a *OAuth2BearerAuthenticator) registerRoutes(r *gin.RouterGroup) {
 	r.GET("/login", a.login)
 	r.GET("/oauth2/callback", a.callback)
+	// Always register logout endpoint for cookie-based auth
+	r.POST("/logout", a.logout)
+}
+
+// logout clears the authentication cookie and returns success
+func (a *OAuth2BearerAuthenticator) logout(c *gin.Context) {
+	if a.useCookies {
+		c.SetSameSite(http.SameSiteLaxMode)
+		c.SetCookie(
+			a.cookieName,   // name
+			"",             // value (empty to clear)
+			-1,             // max age -1 = delete immediately
+			"/",            // path
+			a.cookieDomain, // domain
+			a.cookieSecure, // secure
+			true,           // httpOnly
+		)
+	}
+	c.JSON(200, gin.H{"message": "Logged out successfully"})
 }
 
 // EnableOIDCValidation enforces validation of ID token against the given issuer using JWKS.
-func (a *OAuth2BearerAuthenticator) EnableOIDCValidation(issuer string) {
+func (a *OAuth2BearerAuthenticator) EnableOIDCValidation(issuer string) *OAuth2BearerAuthenticator {
 	a.oidcIssuer = issuer
 	a.validateIDToken = true
+	return a
+}
+
+// EnableCookieAuth enables cookie-based authentication instead of URL token passing.
+// When enabled, the OAuth callback will set an HTTP-only cookie with the JWT token
+// instead of passing it via URL query parameter.
+// Parameters:
+//   - cookieName: The name of the cookie to set (e.g., "mtnai_token")
+//   - cookieDomain: The domain for the cookie (e.g., ".mtnmedia.group" for cross-subdomain)
+//   - secure: Whether to only send the cookie over HTTPS
+func (a *OAuth2BearerAuthenticator) EnableCookieAuth(cookieName, cookieDomain string, secure bool) *OAuth2BearerAuthenticator {
+	a.useCookies = true
+	a.cookieName = cookieName
+	a.cookieDomain = cookieDomain
+	a.cookieSecure = secure
+	// Update the instance to track that cookie auth is enabled
+	if a.instance != nil {
+		a.instance.useCookieAuth = true
+	}
+	return a
 }
 
 func (a *OAuth2BearerAuthenticator) createToken(user User) (string, error) {

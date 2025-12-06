@@ -113,11 +113,12 @@ func (b *AuthenticatorBuilder) BearerOAuth2(oauth2Endpoint oauth2.Endpoint, scop
 			RedirectURL:  domain + basePath + "/oauth2/callback",
 			Scopes:       scopes,
 		},
-		secret: []byte(secret),
-		states: make(StateMap),
-		pkces:  make(StringStateMap),
-		nonces: make(StringStateMap),
-		exp:    86400,
+		secret:   []byte(secret),
+		states:   make(StateMap),
+		pkces:    make(StringStateMap),
+		nonces:   make(StringStateMap),
+		exp:      86400,
+		instance: b.instance,
 	}
 
 	bearer.registerRoutes(b.instance.Gin.Group(basePath))

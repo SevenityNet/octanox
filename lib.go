@@ -34,6 +34,9 @@ type Instance struct {
 	routes []route
 	// serializers is a map of serializers to their respective functions.
 	serializers serializerRegistry
+	// useCookieAuth is a flag that indicates whether cookie-based authentication is enabled.
+	// This is used by the TypeScript code generator to include credentials: 'include' in fetch calls.
+	useCookieAuth bool
 }
 
 // New creates a new instance of the Octanox framework. If an instance already exists, it will return the existing instance.

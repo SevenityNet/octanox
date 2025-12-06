@@ -68,14 +68,22 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 		"  return {",
 	)
 
+	// Add credentials: 'include' when cookie auth is enabled
+	if i.useCookieAuth {
+		builder.writeLine("    credentials: 'include',")
+	}
+
 	if i.Authenticator != nil {
 		authMethod := i.Authenticator.Method()
 		if authMethod == AuthenticationMethodBearer || authMethod == AuthenticationMethodBearerOAuth2 {
-			builder.writeLines(
-				"    headers: {",
-				" 		 'Authorization': `Bearer ${localStorage.getItem('token')}`",
-				"    },",
-			)
+			// Only include Authorization header for backwards compatibility when not using cookie auth
+			if !i.useCookieAuth {
+				builder.writeLines(
+					"    headers: {",
+					" 		 'Authorization': `Bearer ${localStorage.getItem('token')}`",
+					"    },",
+				)
+			}
 		} else if authMethod == AuthenticationMethodBasic {
 			builder.writeLines(
 				"    headers: {",
@@ -98,6 +106,14 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 		"async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {",
 		"  const baseConfig = getBaseConfig()",
 		"  const config = init || {}",
+	)
+
+	// Add credentials from baseConfig when cookie auth is enabled
+	if i.useCookieAuth {
+		builder.writeLine("  config.credentials = baseConfig.credentials")
+	}
+
+	builder.writeLines(
 		"  if (!config.headers) {",
 		"    config.headers = {}",
 		"  }",
@@ -107,9 +123,18 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 		"  if (!config.headers['Accept']) {",
 		"    config.headers['Accept'] = 'application/json'",
 		"  }",
-		"	 if (!config.headers['Authorization'] && baseConfig.headers['Authorization']) {",
-		"    config.headers['Authorization'] = baseConfig.headers['Authorization']",
-		"  }",
+	)
+
+	// Only copy Authorization header when not using cookie auth
+	if !i.useCookieAuth {
+		builder.writeLines(
+			"	 if (!config.headers['Authorization'] && baseConfig.headers['Authorization']) {",
+			"    config.headers['Authorization'] = baseConfig.headers['Authorization']",
+			"  }",
+		)
+	}
+
+	builder.writeLines(
 		"  let response = await fetch(baseUrl + url, config)",
 		"  if (response.status === 401) {",
 		"    unauthorizedHandler()",

@@ -1,6 +1,7 @@
 package octanox
 
 import (
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,7 +26,7 @@ func (a *BearerAuthenticator) Method() AuthenticationMethod {
 
 func (a *BearerAuthenticator) Authenticate(c *gin.Context) (User, error) {
 	token := c.GetHeader("Authorization")
-	if token == "" {
+	if token == "" || len(token) <= 7 || !strings.HasPrefix(token, "Bearer ") {
 		return nil, nil
 	}
 

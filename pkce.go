@@ -4,24 +4,43 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"sync"
 	"time"
 )
 
-// StringStateMap stores string values by key with expiry similar to StateMap.
-type StringStateMap map[string]string
+// StringStateMap is a thread-safe map for storing string values by key with automatic expiry.
+type StringStateMap struct {
+	mu sync.RWMutex
+	m  map[string]string
+}
 
-func (s StringStateMap) Store(key, value string, seconds int) {
-	s[key] = value
+// NewStringStateMap creates a new initialized StringStateMap.
+func NewStringStateMap() *StringStateMap {
+	return &StringStateMap{
+		m: make(map[string]string),
+	}
+}
+
+func (s *StringStateMap) Store(key, value string, seconds int) {
+	s.mu.Lock()
+	s.m[key] = value
+	s.mu.Unlock()
+
 	go func(k string) {
 		<-time.After(time.Duration(seconds) * time.Second)
-		delete(s, k)
+		s.mu.Lock()
+		delete(s.m, k)
+		s.mu.Unlock()
 	}(key)
 }
 
-func (s StringStateMap) Pop(key string) string {
-	val, ok := s[key]
+func (s *StringStateMap) Pop(key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	val, ok := s.m[key]
 	if ok {
-		delete(s, key)
+		delete(s.m, key)
 		return val
 	}
 	return ""
@@ -31,7 +50,9 @@ func (s StringStateMap) Pop(key string) string {
 func generatePKCE() (string, string) {
 	// Generate 32 bytes (results in 43-char base64url encoded string)
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("octanox: failed to generate random bytes for PKCE: " + err.Error())
+	}
 	verifier := base64.RawURLEncoding.EncodeToString(b)
 
 	sum := sha256.Sum256([]byte(verifier))
@@ -42,6 +63,8 @@ func generatePKCE() (string, string) {
 // generateNonce returns a random base64url string suitable for OIDC nonce.
 func generateNonce() string {
 	b := make([]byte, 16) // 128 bits of entropy
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("octanox: failed to generate random bytes for nonce: " + err.Error())
+	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }

@@ -18,9 +18,9 @@ type OAuth2BearerAuthenticator struct {
 	loginSuccessRedirect string
 	secret               []byte
 	exp                  int64
-	states               StateMap
-	pkces                StringStateMap
-	nonces               StringStateMap
+	states               *StateMap
+	pkces                *StringStateMap
+	nonces               *StringStateMap
 	// Optional OIDC ID token validation
 	validateIDToken bool
 	oidcIssuer      string

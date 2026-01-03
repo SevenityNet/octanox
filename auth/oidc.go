@@ -1,4 +1,4 @@
-package octanox
+package auth
 
 import (
 	"crypto/rsa"
@@ -26,11 +26,13 @@ type jwkKey struct {
 	E   string `json:"e"`
 	Alg string `json:"alg"`
 }
+
 type jwksResponse struct {
 	Keys []jwkKey `json:"keys"`
 }
 
-func validateIDTokenWithIssuer(idToken string, issuer string, clientID string, expectedNonce string) error {
+// ValidateIDTokenWithIssuer validates an OIDC ID token against the given issuer using JWKS discovery.
+func ValidateIDTokenWithIssuer(idToken string, issuer string, clientID string, expectedNonce string) error {
 	// Fetch discovery
 	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	resp, err := http.Get(discoveryURL)

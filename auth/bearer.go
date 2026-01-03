@@ -1,4 +1,4 @@
-package octanox
+package auth
 
 import (
 	"strings"
@@ -7,24 +7,37 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/sevenitynet/octanox/model"
 )
 
+// BearerAuthenticator implements JWT Bearer token authentication.
 type BearerAuthenticator struct {
 	provider UserProvider
 	secret   []byte
 	exp      int64
 }
 
-// SetExp sets the expiration time for the token.
+// NewBearerAuthenticator creates a new BearerAuthenticator.
+func NewBearerAuthenticator(provider UserProvider, secret string) *BearerAuthenticator {
+	return &BearerAuthenticator{
+		provider: provider,
+		secret:   []byte(secret),
+		exp:      86400, // Default 1 day
+	}
+}
+
+// SetExp sets the expiration time for the token in seconds.
 func (a *BearerAuthenticator) SetExp(exp int64) {
 	a.exp = exp
 }
 
+// Method returns the authentication method.
 func (a *BearerAuthenticator) Method() AuthenticationMethod {
 	return AuthenticationMethodBearer
 }
 
-func (a *BearerAuthenticator) Authenticate(c *gin.Context) (User, error) {
+// Authenticate extracts and validates the JWT Bearer token from the request.
+func (a *BearerAuthenticator) Authenticate(c *gin.Context) (model.User, error) {
 	token := c.GetHeader("Authorization")
 	if token == "" || len(token) <= 7 || !strings.HasPrefix(token, "Bearer ") {
 		return nil, nil
@@ -41,6 +54,11 @@ func (a *BearerAuthenticator) Authenticate(c *gin.Context) (User, error) {
 	}
 
 	return user, nil
+}
+
+// RegisterRoutes registers the login endpoint on the given router group.
+func (a *BearerAuthenticator) RegisterRoutes(r *gin.RouterGroup) {
+	r.POST("/login", a.login)
 }
 
 func (a *BearerAuthenticator) login(c *gin.Context) {
@@ -73,11 +91,7 @@ func (a *BearerAuthenticator) login(c *gin.Context) {
 	})
 }
 
-func (a *BearerAuthenticator) registerRoutes(r *gin.RouterGroup) {
-	r.POST("/login", a.login)
-}
-
-func (a *BearerAuthenticator) createToken(user User) (string, error) {
+func (a *BearerAuthenticator) createToken(user model.User) (string, error) {
 	currTime := time.Now().Unix()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iss": "Octanox Auth",

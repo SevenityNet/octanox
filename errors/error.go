@@ -1,4 +1,4 @@
-package octanox
+package errors
 
 import (
 	"fmt"

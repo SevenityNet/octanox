@@ -1,17 +1,14 @@
-package octanox
+package middleware
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/gin-gonic/gin"
 )
 
-func logger() gin.HandlerFunc {
-	return gin.Logger()
-}
-
-func cors() gin.HandlerFunc {
+// CORS returns a middleware that handles CORS headers.
+// It reads NOX__CORS_ALLOWED_ORIGINS from environment.
+func CORS() gin.HandlerFunc {
 	corsAllowedOrigin := os.Getenv("NOX__CORS_ALLOWED_ORIGINS")
 
 	return func(c *gin.Context) {
@@ -33,35 +30,5 @@ func cors() gin.HandlerFunc {
 		}
 
 		c.Next()
-	}
-}
-
-func recovery() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		defer func() {
-			if err := recover(); err != nil {
-				failedReq, ok := err.(failedRequest)
-				if ok {
-					c.JSON(failedReq.status, gin.H{"error": failedReq.message})
-					return
-				}
-
-				Current.emitError(Error(fmt.Errorf("internal REST Server Error: %v", err)))
-
-				c.JSON(500, gin.H{"error": "Internal Server Error"})
-			}
-		}()
-		c.Next()
-	}
-}
-
-// errorCollectorToHandler emits all collected errors in the Gin context to the error handlers.
-func errorCollectorToHandler() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		c.Next()
-
-		if len(c.Errors) > 0 {
-			Current.emitError(fmt.Errorf("gin error: %s", c.Errors.String()))
-		}
 	}
 }

@@ -1,4 +1,4 @@
-package octanox
+package codegen
 
 import (
 	"fmt"
@@ -6,7 +6,16 @@ import (
 	"os"
 	"reflect"
 	"strings"
+
+	"github.com/sevenitynet/octanox/auth"
+	"github.com/sevenitynet/octanox/router"
 )
+
+// TSConfig holds configuration for TypeScript client code generation.
+type TSConfig struct {
+	UseCookieAuth bool
+	AuthMethod    *auth.AuthenticationMethod
+}
 
 type tsCodeBuilder struct {
 	sb  strings.Builder
@@ -42,7 +51,8 @@ func (b *tsCodeBuilder) unindent() {
 	b.ind -= 2
 }
 
-func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
+// GenerateTypeScriptClient generates TypeScript client code for the given routes.
+func GenerateTypeScriptClient(path string, routes []router.Route, config TSConfig) {
 	builder := tsCodeBuilder{
 		ind: 0,
 		sb:  strings.Builder{},
@@ -69,28 +79,28 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 	)
 
 	// Add credentials: 'include' when cookie auth is enabled
-	if i.useCookieAuth {
+	if config.UseCookieAuth {
 		builder.writeLine("    credentials: 'include',")
 	}
 
-	if i.Authenticator != nil {
-		authMethod := i.Authenticator.Method()
-		if authMethod == AuthenticationMethodBearer || authMethod == AuthenticationMethodBearerOAuth2 {
+	if config.AuthMethod != nil {
+		authMethod := *config.AuthMethod
+		if authMethod == auth.AuthenticationMethodBearer || authMethod == auth.AuthenticationMethodBearerOAuth2 {
 			// Only include Authorization header for backwards compatibility when not using cookie auth
-			if !i.useCookieAuth {
+			if !config.UseCookieAuth {
 				builder.writeLines(
 					"    headers: {",
 					" 		 'Authorization': `Bearer ${localStorage.getItem('token')}`",
 					"    },",
 				)
 			}
-		} else if authMethod == AuthenticationMethodBasic {
+		} else if authMethod == auth.AuthenticationMethodBasic {
 			builder.writeLines(
 				"    headers: {",
 				"      'Authorization': `Basic ${btoa(`${localStorage.getItem('username')}:${localStorage.getItem('password')}`)}`",
 				"    },",
 			)
-		} else if authMethod == AuthenticationMethodApiKey {
+		} else if authMethod == auth.AuthenticationMethodApiKey {
 			builder.writeLines(
 				"    headers: {",
 				"      'X-API-Key': localStorage.getItem('apiKey')",
@@ -109,7 +119,7 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 	)
 
 	// Add credentials from baseConfig when cookie auth is enabled
-	if i.useCookieAuth {
+	if config.UseCookieAuth {
 		builder.writeLine("  config.credentials = baseConfig.credentials")
 	}
 
@@ -126,7 +136,7 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 	)
 
 	// Only copy Authorization header when not using cookie auth
-	if !i.useCookieAuth {
+	if !config.UseCookieAuth {
 		builder.writeLines(
 			"	 if (!config.headers['Authorization'] && baseConfig.headers['Authorization']) {",
 			"    config.headers['Authorization'] = baseConfig.headers['Authorization']",
@@ -149,13 +159,13 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 
 	// Generate interfaces for the structs in the request body
 	for _, route := range routes {
-		if route.requestType != nil && route.responseType.Name() != "" {
-			builder.generateBodyInterface(route.requestType)
+		if route.RequestType != nil && route.ResponseType.Name() != "" {
+			builder.generateBodyInterface(route.RequestType)
 			builder.writeLine("")
 		}
 
-		if route.responseType != nil && route.responseType.Name() != "" {
-			builder.generateStructInterface(route.responseType)
+		if route.ResponseType != nil && route.ResponseType.Name() != "" {
+			builder.generateStructInterface(route.ResponseType)
 			builder.writeLine("")
 		}
 	}
@@ -174,21 +184,21 @@ func (i *Instance) generateTypeScriptClientCode(path string, routes []route) {
 	}
 }
 
-func (tb *tsCodeBuilder) generateRouteFunction(route route) {
+func (tb *tsCodeBuilder) generateRouteFunction(route router.Route) {
 	tb.write("export async function " + tb.generateFunctionName(route) + "(")
-	if route.requestType != nil {
-		tb.generateFunctionParameters(route.requestType)
+	if route.RequestType != nil {
+		tb.generateFunctionParameters(route.RequestType)
 	}
 
 	tb.write("): Promise<")
-	tb.typeFromGo(route.responseType)
+	tb.typeFromGo(route.ResponseType)
 	tb.writeLine("> {")
 
 	tb.indent()
-	tb.writeLine("let url = `" + route.path + "`")
+	tb.writeLine("let url = `" + route.Path + "`")
 
-	for i := 0; i < route.requestType.NumField(); i++ {
-		field := route.requestType.Field(i)
+	for i := 0; i < route.RequestType.NumField(); i++ {
+		field := route.RequestType.Field(i)
 		if pathParam := field.Tag.Get("path"); pathParam != "" {
 			tb.writeLine("url = url.replace(`:" + pathParam + "`, encodeURIComponent(" + field.Name + ".toString()))")
 		}
@@ -196,22 +206,22 @@ func (tb *tsCodeBuilder) generateRouteFunction(route route) {
 
 	tb.writeLine("const config: RequestInit = {")
 	tb.indent()
-	tb.writeLine("method: '" + strings.ToUpper(route.method) + "',")
+	tb.writeLine("method: '" + strings.ToUpper(route.Method) + "',")
 
-	if route.requestType != nil {
-		if route.method != http.MethodGet && route.requestType.NumField() > 0 {
-			tb.writeLine("body: JSON.stringify(" + tb.getBodyParamName(route.requestType) + "),")
+	if route.RequestType != nil {
+		if route.Method != http.MethodGet && route.RequestType.NumField() > 0 {
+			tb.writeLine("body: JSON.stringify(" + tb.getBodyParamName(route.RequestType) + "),")
 		}
 	}
 
 	tb.unindent()
 	tb.writeLine("};")
 
-	if route.requestType != nil {
+	if route.RequestType != nil {
 		first := true
 
-		for i := 0; i < route.requestType.NumField(); i++ {
-			field := route.requestType.Field(i)
+		for i := 0; i < route.RequestType.NumField(); i++ {
+			field := route.RequestType.Field(i)
 			if queryParam := field.Tag.Get("query"); queryParam != "" {
 				tb.write("url += ")
 				if first {
@@ -227,17 +237,17 @@ func (tb *tsCodeBuilder) generateRouteFunction(route route) {
 	}
 
 	tb.write("  return fetchJson<")
-	tb.typeFromGo(route.responseType)
+	tb.typeFromGo(route.ResponseType)
 	tb.unindent()
 	tb.writeLine(">(url, config);")
 	tb.writeLine("}")
 }
 
-func (tb *tsCodeBuilder) generateFunctionName(route route) string {
-	path := strings.Replace(route.path, os.Getenv("NOX__GEN_OMIT_URL"), "", 1)
+func (tb *tsCodeBuilder) generateFunctionName(route router.Route) string {
+	path := strings.Replace(route.Path, os.Getenv("NOX__GEN_OMIT_URL"), "", 1)
 	path = strings.ReplaceAll(path, "/", "_")
 	path = strings.ReplaceAll(path, ":", "")
-	name := strings.ToLower(route.method) + path
+	name := strings.ToLower(route.Method) + path
 	name = strings.Map(func(r rune) rune {
 		if r == '@' {
 			return -1

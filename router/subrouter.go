@@ -1,4 +1,4 @@
-package octanox
+package router
 
 import (
 	"fmt"
@@ -6,25 +6,27 @@ import (
 	"reflect"
 
 	"github.com/gin-gonic/gin"
+	"github.com/sevenitynet/octanox/request"
 )
 
-// Router is a struct that represents a router in the Octanox framework. It wraps around a Gin router group with the only two differences
+// SubRouter is a struct that represents a router in the Octanox framework.
+// It wraps around a Gin router group with the only two differences
 // to populate the request handlers, handling responses and emit the DTOs to the client code generation process.
 type SubRouter struct {
 	url string
 	gin *gin.RouterGroup
 }
 
-func (s *SubRouter) combineURL(path string) string {
-	return s.url + path
+// NewSubRouter creates a new SubRouter from a Gin router group.
+func NewSubRouter(gin *gin.RouterGroup) *SubRouter {
+	return &SubRouter{
+		url: "",
+		gin: gin,
+	}
 }
 
-// route is a struct containing metadata about a route in the Octanox framework.
-type route struct {
-	method       string
-	path         string
-	requestType  reflect.Type
-	responseType reflect.Type
+func (s *SubRouter) combineURL(path string) string {
+	return s.url + path
 }
 
 // Router creates a new router with the given URL prefix.
@@ -35,7 +37,7 @@ func (r *SubRouter) Router(url string) *SubRouter {
 	}
 }
 
-// Gin returns the underlying Gin router group for adding middleware
+// Gin returns the underlying Gin router group for adding middleware.
 func (r *SubRouter) Gin() *gin.RouterGroup {
 	return r.gin
 }
@@ -57,19 +59,21 @@ func (r *SubRouter) RegisterManually(path string, handler interface{}, authentic
 
 	resType := handlerType.Out(0)
 
-	method := detectHTTPMethod(reqType)
+	method := DetectHTTPMethod(reqType)
 
-	if Current.isDryRun {
-		Current.routes = append(Current.routes, route{
-			method:       method,
-			path:         r.combineURL(path),
-			requestType:  reqType,
-			responseType: resType,
-		})
+	if IsDryRunFunc != nil && IsDryRunFunc() {
+		if AddRouteFunc != nil {
+			AddRouteFunc(Route{
+				Method:       method,
+				Path:         r.combineURL(path),
+				RequestType:  reqType,
+				ResponseType: resType,
+			})
+		}
 	}
 
 	r.gin.Handle(method, path, func(c *gin.Context) {
-		wrapHandler(c, reqType, reflect.ValueOf(handler), authenticated, roles)
+		WrapHandler(c, reqType, reflect.ValueOf(handler), authenticated, roles)
 	})
 }
 
@@ -77,7 +81,8 @@ func (r *SubRouter) RegisterManually(path string, handler interface{}, authentic
 // If an authenticator is set, the route will be protected.
 // Should return the response. Can return a Context to set the serializer context.
 func (r *SubRouter) Register(path string, handler interface{}, roles ...string) {
-	r.RegisterManually(path, handler, Current.Authenticator != nil, roles...)
+	hasAuth := HasAuthenticatorFunc != nil && HasAuthenticatorFunc()
+	r.RegisterManually(path, handler, hasAuth, roles...)
 }
 
 // RegisterPublic registers a new public route handler. The function automatically detects the method, request and response type. If any of these detection fails, it will panic.
@@ -90,89 +95,32 @@ func (r *SubRouter) RegisterProtected(path string, handler interface{}, roles ..
 	r.RegisterManually(path, handler, true, roles...)
 }
 
-// detectHTTPMethod determines the HTTP method from the embedded struct in the request type.
-func detectHTTPMethod(reqType reflect.Type) string {
+// DetectHTTPMethod determines the HTTP method from the embedded struct in the request type.
+func DetectHTTPMethod(reqType reflect.Type) string {
 	for i := 0; i < reqType.NumField(); i++ {
 		field := reqType.Field(i)
 
 		if field.Anonymous {
 			switch field.Type {
-			case reflect.TypeOf(GetRequest{}):
+			case reflect.TypeOf(request.GetRequest{}):
 				return http.MethodGet
-			case reflect.TypeOf(PostRequest{}):
+			case reflect.TypeOf(request.PostRequest{}):
 				return http.MethodPost
-			case reflect.TypeOf(PutRequest{}):
+			case reflect.TypeOf(request.PutRequest{}):
 				return http.MethodPut
-			case reflect.TypeOf(DeleteRequest{}):
+			case reflect.TypeOf(request.DeleteRequest{}):
 				return http.MethodDelete
-			case reflect.TypeOf(PatchRequest{}):
+			case reflect.TypeOf(request.PatchRequest{}):
 				return http.MethodPatch
-			case reflect.TypeOf(OptionsRequest{}):
+			case reflect.TypeOf(request.OptionsRequest{}):
 				return http.MethodOptions
-			case reflect.TypeOf(HeadRequest{}):
+			case reflect.TypeOf(request.HeadRequest{}):
 				return http.MethodHead
-			case reflect.TypeOf(TraceRequest{}):
+			case reflect.TypeOf(request.TraceRequest{}):
 				return http.MethodTrace
 			}
 		}
 	}
 
 	panic("Failed to detect HTTP method: No recognized embedded request struct found")
-}
-
-// wrapHandler wraps the gin context and the handler function to call the handler function with the correct parameters and handle the response.
-func wrapHandler(c *gin.Context, reqType reflect.Type, handler reflect.Value, authenticated bool, roles []string) {
-	var user User
-	if Current.Authenticator != nil {
-		usr, err := Current.Authenticator.Authenticate(c)
-		if err != nil {
-			panic(err)
-		}
-
-		if authenticated {
-			if usr == nil {
-				c.JSON(401, gin.H{"error": "unauthorized"})
-				return
-			}
-		}
-
-		user = usr
-
-		if authenticated {
-			if len(roles) > 0 {
-				hasRequiredRole := false
-				for _, role := range roles {
-					if user.HasRole(role) {
-						hasRequiredRole = true
-						break
-					}
-				}
-
-				if !hasRequiredRole {
-					c.JSON(403, gin.H{"error": "forbidden"})
-					return
-				}
-			}
-		}
-	}
-
-	req := populateRequest(c, reqType, user)
-	rv := handler.Call([]reflect.Value{reflect.ValueOf(req)})
-	res := rv[0].Interface()
-
-	var sc Context
-	if len(rv) > 1 {
-		sc = rv[1].Interface().(Context)
-	}
-
-	if res == nil {
-		c.Status(204)
-		return
-	}
-
-	if _, ok := res.(error); ok {
-		panic(res)
-	}
-
-	c.JSON(200, Current.Serialize(res, sc))
 }

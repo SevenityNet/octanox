@@ -1,4 +1,4 @@
-package octanox
+package hook
 
 // Hook is the type of a hook function that can be registered within the Octanox framework.
 type Hook string

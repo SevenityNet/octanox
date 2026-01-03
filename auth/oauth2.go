@@ -1,4 +1,4 @@
-package octanox
+package auth
 
 import (
 	"context"
@@ -9,9 +9,11 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/sevenitynet/octanox/model"
 	"golang.org/x/oauth2"
 )
 
+// OAuth2BearerAuthenticator implements OAuth2 Bearer token authentication with PKCE.
 type OAuth2BearerAuthenticator struct {
 	provider             OAuth2UserProvider
 	config               oauth2.Config
@@ -29,20 +31,65 @@ type OAuth2BearerAuthenticator struct {
 	cookieName   string
 	cookieDomain string
 	cookieSecure bool
-	// Reference to the Instance for tracking cookie auth state
-	instance *Instance
+	// Callback for when cookie auth is enabled (used by Instance)
+	onCookieAuthEnabled func()
 }
 
-// SetExp sets the expiration time for the token.
+// OAuth2Config holds the configuration for creating an OAuth2BearerAuthenticator.
+type OAuth2Config struct {
+	Provider             OAuth2UserProvider
+	Endpoint             oauth2.Endpoint
+	Scopes               []string
+	ClientID             string
+	ClientSecret         string
+	Domain               string // Domain of this application (no trailing slash)
+	BasePath             string // Base path for auth routes
+	LoginSuccessRedirect string
+	Secret               string // JWT signing secret
+}
+
+// NewOAuth2BearerAuthenticator creates a new OAuth2BearerAuthenticator.
+func NewOAuth2BearerAuthenticator(cfg OAuth2Config) *OAuth2BearerAuthenticator {
+	return &OAuth2BearerAuthenticator{
+		provider:             cfg.Provider,
+		loginSuccessRedirect: cfg.LoginSuccessRedirect,
+		config: oauth2.Config{
+			ClientID:     cfg.ClientID,
+			ClientSecret: cfg.ClientSecret,
+			Endpoint:     cfg.Endpoint,
+			RedirectURL:  cfg.Domain + cfg.BasePath + "/oauth2/callback",
+			Scopes:       cfg.Scopes,
+		},
+		secret: []byte(cfg.Secret),
+		states: NewStateMap(),
+		pkces:  NewStringStateMap(),
+		nonces: NewStringStateMap(),
+		exp:    86400, // Default 1 day
+	}
+}
+
+// SetOnCookieAuthEnabled sets a callback to be invoked when cookie auth is enabled.
+func (a *OAuth2BearerAuthenticator) SetOnCookieAuthEnabled(callback func()) {
+	a.onCookieAuthEnabled = callback
+}
+
+// SetExp sets the expiration time for the token in seconds.
 func (a *OAuth2BearerAuthenticator) SetExp(exp int64) {
 	a.exp = exp
 }
 
+// Method returns the authentication method.
 func (a *OAuth2BearerAuthenticator) Method() AuthenticationMethod {
 	return AuthenticationMethodBearerOAuth2
 }
 
-func (a *OAuth2BearerAuthenticator) Authenticate(c *gin.Context) (User, error) {
+// UsesCookies returns true if cookie-based authentication is enabled.
+func (a *OAuth2BearerAuthenticator) UsesCookies() bool {
+	return a.useCookies
+}
+
+// Authenticate extracts and validates the JWT token from cookie or Authorization header.
+func (a *OAuth2BearerAuthenticator) Authenticate(c *gin.Context) (model.User, error) {
 	var tokenString string
 
 	// If cookie auth is enabled, check cookie first
@@ -77,12 +124,20 @@ func (a *OAuth2BearerAuthenticator) Authenticate(c *gin.Context) (User, error) {
 	return user, nil
 }
 
+// RegisterRoutes registers the OAuth2 endpoints on the given router group.
+func (a *OAuth2BearerAuthenticator) RegisterRoutes(r *gin.RouterGroup) {
+	r.GET("/login", a.login)
+	r.GET("/oauth2/callback", a.callback)
+	// Always register logout endpoint for cookie-based auth
+	r.POST("/logout", a.logout)
+}
+
 func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 	// Generate a state and PKCE pair
 	state := a.states.Generate(300)
-	verifier, challenge := generatePKCE()
+	verifier, challenge := GeneratePKCE()
 	a.pkces.Store(state, verifier, 600)
-	nonce := generateNonce()
+	nonce := GenerateNonce()
 	a.nonces.Store(state, nonce, 600)
 
 	// Request authorization code with PKCE (S256)
@@ -127,7 +182,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	if a.validateIDToken {
 		if raw := token.Extra("id_token"); raw != nil {
 			idToken, _ := raw.(string)
-			if err := validateIDTokenWithIssuer(idToken, a.oidcIssuer, a.config.ClientID, expectedNonce); err != nil {
+			if err := ValidateIDTokenWithIssuer(idToken, a.oidcIssuer, a.config.ClientID, expectedNonce); err != nil {
 				c.String(400, "Invalid ID Token")
 				return
 			}
@@ -172,14 +227,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	c.Redirect(302, a.loginSuccessRedirect+"?token="+jwt)
 }
 
-func (a *OAuth2BearerAuthenticator) registerRoutes(r *gin.RouterGroup) {
-	r.GET("/login", a.login)
-	r.GET("/oauth2/callback", a.callback)
-	// Always register logout endpoint for cookie-based auth
-	r.POST("/logout", a.logout)
-}
-
-// logout clears the authentication cookie and returns success
+// logout clears the authentication cookie and returns success.
 func (a *OAuth2BearerAuthenticator) logout(c *gin.Context) {
 	if a.useCookies {
 		c.SetSameSite(http.SameSiteLaxMode)
@@ -215,14 +263,14 @@ func (a *OAuth2BearerAuthenticator) EnableCookieAuth(cookieName, cookieDomain st
 	a.cookieName = cookieName
 	a.cookieDomain = cookieDomain
 	a.cookieSecure = secure
-	// Update the instance to track that cookie auth is enabled
-	if a.instance != nil {
-		a.instance.useCookieAuth = true
+	// Notify the instance if callback is set
+	if a.onCookieAuthEnabled != nil {
+		a.onCookieAuthEnabled()
 	}
 	return a
 }
 
-func (a *OAuth2BearerAuthenticator) createToken(user User) (string, error) {
+func (a *OAuth2BearerAuthenticator) createToken(user model.User) (string, error) {
 	currTime := time.Now().Unix()
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
 		"iss": "Octanox Auth",

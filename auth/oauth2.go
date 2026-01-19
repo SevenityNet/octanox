@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -153,6 +154,23 @@ func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 }
 
 func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
+	// Check for OAuth error (e.g., user denied access)
+	if errParam := c.Query("error"); errParam != "" {
+		// Clean up state if present (user may have denied after starting flow)
+		if state := c.Query("state"); state != "" {
+			a.states.ValidateOnce(state) // Remove from state map
+			a.pkces.Pop(state)           // Remove PKCE verifier
+			a.nonces.Pop(state)          // Remove nonce
+		}
+		// Redirect to frontend with error (URL-encode parameters)
+		errorDesc := c.Query("error_description")
+		if errorDesc == "" {
+			errorDesc = errParam
+		}
+		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape(errParam)+"&error_description="+url.QueryEscape(errorDesc))
+		return
+	}
+
 	state := c.Query("state")
 	if !a.states.ValidateOnce(state) {
 		c.String(400, "invalid state")

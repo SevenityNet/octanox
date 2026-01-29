@@ -173,7 +173,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 
 	state := c.Query("state")
 	if !a.states.ValidateOnce(state) {
-		c.String(400, "invalid state")
+		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("invalid_state")+"&error_description="+url.QueryEscape("Invalid or expired OAuth state"))
 		return
 	}
 
@@ -182,7 +182,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	// Retrieve PKCE verifier for this state
 	verifier := a.pkces.Pop(state)
 	if verifier == "" {
-		c.String(400, "missing PKCE verifier")
+		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("missing_pkce")+"&error_description="+url.QueryEscape("Missing PKCE verifier"))
 		return
 	}
 	// Retrieve expected nonce for this state (may be empty if not used)
@@ -192,7 +192,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 		oauth2.SetAuthURLParam("code_verifier", verifier),
 	)
 	if err != nil {
-		c.String(400, "Token Exchange Failed")
+		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("token_exchange_failed")+"&error_description="+url.QueryEscape("Token exchange failed"))
 		return
 	}
 
@@ -201,22 +201,23 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 		if raw := token.Extra("id_token"); raw != nil {
 			idToken, _ := raw.(string)
 			if err := ValidateIDTokenWithIssuer(idToken, a.oidcIssuer, a.config.ClientID, expectedNonce); err != nil {
-				c.String(400, "Invalid ID Token")
+				c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("invalid_id_token")+"&error_description="+url.QueryEscape("Invalid ID token"))
 				return
 			}
 		} else {
-			c.String(400, "Missing ID Token")
+			c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("missing_id_token")+"&error_description="+url.QueryEscape("Missing ID token"))
 			return
 		}
 	}
 
 	user, err := a.provider.ProvideForLogin(token.AccessToken)
 	if err != nil {
-		panic(err)
+		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("login_failed")+"&error_description="+url.QueryEscape("Login failed"))
+		return
 	}
 
 	if user == nil {
-		c.String(400, "User not found")
+		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("user_not_found")+"&error_description="+url.QueryEscape("User not found"))
 		return
 	}
 

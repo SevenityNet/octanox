@@ -115,6 +115,7 @@ func New() *Instance {
 	Current.emitHook(hook.Hook_Init)
 
 	Current.Gin.Use(middleware.CORS())
+	Current.Gin.Use(middleware.SecurityHeaders())
 	Current.Gin.Use(middleware.Logger())
 	Current.Gin.Use(middleware.Recovery())
 	Current.Gin.Use(middleware.ErrorCollector())

@@ -32,6 +32,8 @@ type OAuth2BearerAuthenticator struct {
 	cookieSecure bool
 	// Callback for when cookie auth is enabled (used by Instance)
 	onCookieAuthEnabled func()
+	// Optional callback invoked during logout (e.g., to clear additional cookies)
+	onLogout func(*gin.Context)
 }
 
 // OAuth2Config holds the configuration for creating an OAuth2BearerAuthenticator.
@@ -247,7 +249,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	c.Redirect(302, a.loginSuccessRedirect+"?token="+jwt)
 }
 
-// logout clears the authentication cookie and returns success.
+// logout clears the authentication cookie, invokes the OnLogout hook, and returns success.
 func (a *OAuth2BearerAuthenticator) logout(c *gin.Context) {
 	if a.useCookies {
 		c.SetSameSite(http.SameSiteLaxMode)
@@ -260,6 +262,9 @@ func (a *OAuth2BearerAuthenticator) logout(c *gin.Context) {
 			a.cookieSecure, // secure
 			true,           // httpOnly
 		)
+	}
+	if a.onLogout != nil {
+		a.onLogout(c)
 	}
 	c.JSON(200, gin.H{"message": "Logged out successfully"})
 }
@@ -287,6 +292,13 @@ func (a *OAuth2BearerAuthenticator) EnableCookieAuth(cookieName, cookieDomain st
 	if a.onCookieAuthEnabled != nil {
 		a.onCookieAuthEnabled()
 	}
+	return a
+}
+
+// OnLogout registers a callback invoked during the logout handler, after the access
+// cookie is cleared. Use this to clear additional cookies (e.g., refresh, image token).
+func (a *OAuth2BearerAuthenticator) OnLogout(fn func(*gin.Context)) *OAuth2BearerAuthenticator {
+	a.onLogout = fn
 	return a
 }
 

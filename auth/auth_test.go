@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -328,75 +329,82 @@ func TestApiKeyAuthenticator_Authenticate_InvalidKey(t *testing.T) {
 	}
 }
 
-// --- StateMap Tests ---
+// --- MemoryStateStore Tests ---
 
-func TestStateMap_Generate(t *testing.T) {
-	sm := NewStateMap()
+func TestMemoryStateStore_SetAndPop(t *testing.T) {
+	store := NewMemoryStateStore()
+	ctx := context.Background()
 
-	state := sm.Generate(5)
-	if state == "" {
-		t.Error("expected non-empty state")
+	if err := store.Set(ctx, "key1", "value1", 5*time.Second); err != nil {
+		t.Fatalf("Set failed: %v", err)
 	}
 
-	// Should be a valid UUID
-	if _, err := uuid.Parse(state); err != nil {
-		t.Errorf("expected valid UUID, got %s", state)
+	val, err := store.Pop(ctx, "key1")
+	if err != nil {
+		t.Fatalf("Pop failed: %v", err)
 	}
-}
-
-func TestStateMap_Validate(t *testing.T) {
-	sm := NewStateMap()
-
-	state := sm.Generate(5)
-
-	if !sm.Validate(state) {
-		t.Error("expected Validate to return true for generated state")
-	}
-
-	if sm.Validate("nonexistent") {
-		t.Error("expected Validate to return false for nonexistent state")
-	}
-}
-
-func TestStateMap_ValidateOnce(t *testing.T) {
-	sm := NewStateMap()
-
-	state := sm.Generate(5)
-
-	if !sm.ValidateOnce(state) {
-		t.Error("expected ValidateOnce to return true first time")
-	}
-
-	if sm.ValidateOnce(state) {
-		t.Error("expected ValidateOnce to return false second time (state consumed)")
-	}
-}
-
-// --- StringStateMap Tests ---
-
-func TestStringStateMap_StoreAndPop(t *testing.T) {
-	ssm := NewStringStateMap()
-
-	ssm.Store("key1", "value1", 5)
-
-	val := ssm.Pop("key1")
 	if val != "value1" {
 		t.Errorf("expected value1, got %s", val)
 	}
 
 	// Should be removed after Pop
-	val = ssm.Pop("key1")
+	val, err = store.Pop(ctx, "key1")
+	if err != nil {
+		t.Fatalf("Pop failed: %v", err)
+	}
 	if val != "" {
 		t.Errorf("expected empty string after second Pop, got %s", val)
 	}
 }
 
-func TestStringStateMap_PopNonexistent(t *testing.T) {
-	ssm := NewStringStateMap()
+func TestMemoryStateStore_PopNonexistent(t *testing.T) {
+	store := NewMemoryStateStore()
+	ctx := context.Background()
 
-	val := ssm.Pop("nonexistent")
+	val, err := store.Pop(ctx, "nonexistent")
+	if err != nil {
+		t.Fatalf("Pop failed: %v", err)
+	}
 	if val != "" {
 		t.Errorf("expected empty string for nonexistent key, got %s", val)
+	}
+}
+
+func TestFuncStateStore(t *testing.T) {
+	data := make(map[string]string)
+
+	store := NewFuncStateStore(
+		func(_ context.Context, key, value string, _ time.Duration) error {
+			data[key] = value
+			return nil
+		},
+		func(_ context.Context, key string) (string, error) {
+			val, ok := data[key]
+			if ok {
+				delete(data, key)
+				return val, nil
+			}
+			return "", nil
+		},
+	)
+
+	ctx := context.Background()
+
+	if err := store.Set(ctx, "k", "v", time.Minute); err != nil {
+		t.Fatalf("Set failed: %v", err)
+	}
+
+	val, err := store.Pop(ctx, "k")
+	if err != nil {
+		t.Fatalf("Pop failed: %v", err)
+	}
+	if val != "v" {
+		t.Errorf("expected v, got %s", val)
+	}
+
+	val, _ = store.Pop(ctx, "k")
+	if val != "" {
+		t.Errorf("expected empty after second Pop, got %s", val)
 	}
 }
 

@@ -3,9 +3,13 @@ package octanox
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"reflect"
+	"strconv"
+	"syscall"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
@@ -72,6 +76,8 @@ type Instance struct {
 	// useCookieAuth is a flag that indicates whether cookie-based authentication is enabled.
 	// This is used by the TypeScript code generator to include credentials: 'include' in fetch calls.
 	useCookieAuth bool
+	// shutdownTimeout is the maximum time to wait for HTTP connections to drain during shutdown.
+	shutdownTimeout time.Duration
 }
 
 // New creates a new instance of the Octanox framework. If an instance already exists, it will return the existing instance.
@@ -87,11 +93,18 @@ func New() *Instance {
 		SubRouter: router.NewSubRouter(&ginEngine.RouterGroup),
 		Gin:       ginEngine,
 		hooks:     make(map[hook.Hook][]func(*Instance)),
-		errorHandlers: make([]func(error), 0),
-		isDebug:       gin.Mode() == gin.DebugMode,
-		isDryRun:      os.Getenv("NOX__DRY_RUN") == "true",
-		routes:        make([]router.Route, 0),
-		serializers:   serialize.NewRegistry(),
+		errorHandlers:   make([]func(error), 0),
+		isDebug:         gin.Mode() == gin.DebugMode,
+		isDryRun:        os.Getenv("NOX__DRY_RUN") == "true",
+		routes:          make([]router.Route, 0),
+		serializers:     serialize.NewRegistry(),
+		shutdownTimeout: 30 * time.Second,
+	}
+
+	if t := os.Getenv("NOX__SHUTDOWN_TIMEOUT"); t != "" {
+		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
+			Current.shutdownTimeout = time.Duration(secs) * time.Second
+		}
 	}
 
 	// Wire up function variables to break circular dependencies
@@ -137,18 +150,36 @@ func (i *Instance) ErrorHandler(f func(error)) {
 	i.errorHandlers = append(i.errorHandlers, f)
 }
 
-// Run starts the Octanox runtime. This function will block the current goroutine. If any error occurs, it will panic.
+// SetShutdownTimeout sets the maximum time to wait for HTTP connections to drain during shutdown.
+// Default is 30 seconds. Can also be set via NOX__SHUTDOWN_TIMEOUT environment variable.
+func (i *Instance) SetShutdownTimeout(d time.Duration) *Instance {
+	i.shutdownTimeout = d
+	return i
+}
+
+// Run starts the Octanox runtime. This function will block the current goroutine.
 func (i *Instance) Run() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 
 	log.Println("Starting Octanox...")
-	go i.runInternally()
+	srv := i.startServer()
 
 	<-ctx.Done()
 
 	log.Println("Shutting down...")
 	i.emitHook(hook.Hook_Shutdown)
+
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), i.shutdownTimeout)
+	defer drainCancel()
+
+	if err := srv.Shutdown(drainCtx); err != nil {
+		log.Printf("HTTP server shutdown error: %v", err)
+	} else {
+		log.Println("HTTP server drained successfully")
+	}
+
+	i.emitHook(hook.Hook_AfterShutdown)
 }
 
 func (i *Instance) emitHook(h hook.Hook) {
@@ -165,7 +196,7 @@ func (i *Instance) emitError(err error) {
 	}
 }
 
-func (i *Instance) runInternally() {
+func (i *Instance) startServer() *http.Server {
 	i.emitHook(hook.Hook_BeforeStart)
 
 	if i.isDryRun {
@@ -183,12 +214,35 @@ func (i *Instance) runInternally() {
 		})
 		log.Println("TypeScript code generated successfully.")
 		os.Exit(0)
-		return
+		return nil
 	}
 
 	i.emitHook(hook.Hook_Start)
 
-	i.Gin.Run()
+	addr := resolveAddr()
+	srv := &http.Server{
+		Addr:    addr,
+		Handler: i.Gin,
+	}
+
+	go func() {
+		log.Printf("Listening on %s", addr)
+		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("HTTP server error: %v", err)
+		}
+	}()
+
+	return srv
+}
+
+func resolveAddr() string {
+	if port := os.Getenv("PORT"); port != "" {
+		if _, err := strconv.Atoi(port); err == nil {
+			return ":" + port
+		}
+		return port
+	}
+	return ":8080"
 }
 
 // Serialize serializes an object into another form using the registered serializers.

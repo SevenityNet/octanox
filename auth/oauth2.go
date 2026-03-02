@@ -21,9 +21,7 @@ type OAuth2BearerAuthenticator struct {
 	loginSuccessRedirect string
 	secret               []byte
 	exp                  int64
-	states               *StateMap
-	pkces                *StringStateMap
-	nonces               *StringStateMap
+	stateStore OAuthStateStore
 	// Optional OIDC ID token validation
 	validateIDToken bool
 	oidcIssuer      string
@@ -62,9 +60,7 @@ func NewOAuth2BearerAuthenticator(cfg OAuth2Config) *OAuth2BearerAuthenticator {
 			Scopes:       cfg.Scopes,
 		},
 		secret: []byte(cfg.Secret),
-		states: NewStateMap(),
-		pkces:  NewStringStateMap(),
-		nonces: NewStringStateMap(),
+		stateStore: NewMemoryStateStore(),
 		exp:    86400, // Default 1 day
 	}
 }
@@ -135,11 +131,13 @@ func (a *OAuth2BearerAuthenticator) RegisterRoutes(r *gin.RouterGroup) {
 
 func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 	// Generate a state and PKCE pair
-	state := a.states.Generate(300)
+	state := uuid.NewString()
+	ctx := c.Request.Context()
+	a.stateStore.Set(ctx, "s:"+state, "1", 300*time.Second)
 	verifier, challenge := GeneratePKCE()
-	a.pkces.Store(state, verifier, 600)
+	a.stateStore.Set(ctx, "p:"+state, verifier, 600*time.Second)
 	nonce := GenerateNonce()
-	a.nonces.Store(state, nonce, 600)
+	a.stateStore.Set(ctx, "n:"+state, nonce, 600*time.Second)
 
 	// Request authorization code with PKCE (S256)
 	url := a.config.AuthCodeURL(state,
@@ -158,9 +156,10 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	if errParam := c.Query("error"); errParam != "" {
 		// Clean up state if present (user may have denied after starting flow)
 		if state := c.Query("state"); state != "" {
-			a.states.ValidateOnce(state) // Remove from state map
-			a.pkces.Pop(state)           // Remove PKCE verifier
-			a.nonces.Pop(state)          // Remove nonce
+			ctx := c.Request.Context()
+			a.stateStore.Pop(ctx, "s:"+state)
+			a.stateStore.Pop(ctx, "p:"+state)
+			a.stateStore.Pop(ctx, "n:"+state)
 		}
 		// Redirect to frontend with error (URL-encode parameters)
 		errorDesc := c.Query("error_description")
@@ -172,7 +171,9 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	}
 
 	state := c.Query("state")
-	if !a.states.ValidateOnce(state) {
+	ctx := c.Request.Context()
+	val, _ := a.stateStore.Pop(ctx, "s:"+state)
+	if val == "" {
 		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("invalid_state")+"&error_description="+url.QueryEscape("Invalid or expired OAuth state"))
 		return
 	}
@@ -180,13 +181,13 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	code := c.Query("code")
 
 	// Retrieve PKCE verifier for this state
-	verifier := a.pkces.Pop(state)
+	verifier, _ := a.stateStore.Pop(ctx, "p:"+state)
 	if verifier == "" {
 		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("missing_pkce")+"&error_description="+url.QueryEscape("Missing PKCE verifier"))
 		return
 	}
 	// Retrieve expected nonce for this state (may be empty if not used)
-	expectedNonce := a.nonces.Pop(state)
+	expectedNonce, _ := a.stateStore.Pop(ctx, "n:"+state)
 
 	token, err := a.config.Exchange(context.Background(), code,
 		oauth2.SetAuthURLParam("code_verifier", verifier),
@@ -286,6 +287,14 @@ func (a *OAuth2BearerAuthenticator) EnableCookieAuth(cookieName, cookieDomain st
 	if a.onCookieAuthEnabled != nil {
 		a.onCookieAuthEnabled()
 	}
+	return a
+}
+
+// SetStateStore sets a custom OAuthStateStore for storing OAuth2 state, PKCE verifiers, and nonces.
+// Use this to share state across multiple instances (e.g., with Redis via FuncStateStore).
+// By default, an in-memory store is used which only works for single-instance deployments.
+func (a *OAuth2BearerAuthenticator) SetStateStore(store OAuthStateStore) *OAuth2BearerAuthenticator {
+	a.stateStore = store
 	return a
 }
 

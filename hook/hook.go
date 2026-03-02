@@ -12,4 +12,7 @@ const (
 	Hook_Start Hook = "start"
 	// Shutdown is a hook that is called when the Octanox runtime is shutting down.
 	Hook_Shutdown Hook = "shutdown"
+	// AfterShutdown is a hook that is called after the HTTP server has finished draining.
+	// Use this for final cleanup (closing databases, flushing telemetry).
+	Hook_AfterShutdown Hook = "after_shutdown"
 )

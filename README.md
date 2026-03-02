@@ -41,7 +41,9 @@ func main() {
 - **Built-in Authentication**: Support for Bearer JWT, Basic Auth, API Key, and OAuth2/OIDC
 - **Response Serialization**: Register custom serializers to transform responses
 - **TypeScript Code Generation**: Automatically generate TypeScript client code for your API
-- **Lifecycle Hooks**: Hook into init, before_start, start, and shutdown events
+- **Lifecycle Hooks**: Hook into init, before_start, start, shutdown, and after_shutdown events
+- **Graceful Shutdown**: SIGTERM/SIGINT handling with configurable HTTP drain timeout
+- **Pluggable OAuth2 State Store**: Interface-based state storage for multi-instance deployments
 
 ## Package Structure
 
@@ -158,8 +160,65 @@ app.Hook(hook.Hook_Start, func(i *octanox.Instance) {
 })
 
 app.Hook(hook.Hook_Shutdown, func(i *octanox.Instance) {
-    // Called on graceful shutdown
+    // Called on SIGTERM/SIGINT, before HTTP drain (stop schedulers here)
 })
+
+app.Hook(hook.Hook_AfterShutdown, func(i *octanox.Instance) {
+    // Called after HTTP server has drained (close DB, flush telemetry here)
+})
+```
+
+## Graceful Shutdown
+
+Octanox handles `SIGTERM` and `SIGINT` signals automatically with a two-phase shutdown:
+
+1. **`Hook_Shutdown`** fires — stop background work (schedulers, workers)
+2. **HTTP drain** — in-flight requests complete within the timeout
+3. **`Hook_AfterShutdown`** fires — close database connections, flush telemetry
+
+The default drain timeout is 30 seconds. Configure it via:
+
+```go
+app.SetShutdownTimeout(60 * time.Second)
+```
+
+Or via environment variable:
+
+```bash
+NOX__SHUTDOWN_TIMEOUT=60  # seconds
+```
+
+## OAuth2 State Store
+
+By default, OAuth2 state (CSRF tokens, PKCE verifiers, nonces) is stored in memory. For multi-instance deployments, plug in an external store:
+
+```go
+import "github.com/sevenitynet/octanox/auth"
+
+// Using FuncStateStore adapter with Redis
+store := auth.NewFuncStateStore(
+    func(ctx context.Context, key, value string, ttl time.Duration) error {
+        return redisClient.Set(ctx, key, value, ttl).Err()
+    },
+    func(ctx context.Context, key string) (string, error) {
+        val, err := redisClient.GetDel(ctx, key).Result()
+        if errors.Is(err, redis.Nil) { return "", nil }
+        return val, err
+    },
+)
+
+app.Authenticate(&myProvider{}).
+    BearerOAuth2(...).
+    SetStateStore(store)
+```
+
+The `OAuthStateStore` interface requires only two methods:
+
+```go
+type OAuthStateStore interface {
+    Set(ctx context.Context, key, value string, ttl time.Duration) error
+    Pop(ctx context.Context, key string) (string, error)
+}
 ```
 
 ## Error Handling
@@ -201,13 +260,15 @@ This generates a TypeScript client with typed functions for all registered route
 | `NOX__DRY_RUN` | Enable dry-run mode for code generation |
 | `NOX__CLIENT_DIR` | Output directory for generated TypeScript |
 | `NOX__GEN_OMIT_URL` | URL prefix to omit from generated function names |
+| `NOX__SHUTDOWN_TIMEOUT` | HTTP drain timeout in seconds (default: 30) |
+| `PORT` | Listen port (default: 8080) |
 
 ## Version
 
 ```go
 import "github.com/sevenitynet/octanox"
 
-fmt.Println(octanox.Version) // "1.0.0"
+fmt.Println(octanox.Version) // "1.1.0"
 ```
 
 ## License

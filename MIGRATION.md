@@ -59,7 +59,7 @@ func handler(req *MyRequest) (any, ctx.Context) { ... }
 | Package | Contents |
 |---------|----------|
 | `octanox` | Instance, New(), Run(), Authenticate(), RegisterSerializer() |
-| `octanox/auth` | OAuth2UserProvider, Authenticator, BearerAuthenticator, OAuth2BearerAuthenticator, PKCE, StateMap |
+| `octanox/auth` | OAuth2UserProvider, Authenticator, BearerAuthenticator, OAuth2BearerAuthenticator, PKCE, OAuthStateStore |
 | `octanox/ctx` | Context type and helpers (FromMap, FromQuery) |
 | `octanox/model` | User interface |
 | `octanox/request` | GetRequest, PostRequest, PutRequest, DeleteRequest, PatchRequest |
@@ -73,3 +73,42 @@ func handler(req *MyRequest) (any, ctx.Context) { ... }
 ## No Action Required
 
 Existing applications do not need to change any imports. The re-exports have zero runtime cost (Go type aliases).
+
+---
+
+## v1.1.0 Changes
+
+### Graceful Shutdown (automatic)
+
+`Run()` now handles `SIGTERM` in addition to `SIGINT`, and gracefully drains HTTP connections before exiting. This is fully automatic — no code changes needed.
+
+New hook `Hook_AfterShutdown` fires after HTTP drain completes:
+
+```go
+nox.Hook(hook.Hook_Shutdown, func(_ *octanox.Instance) {
+    scheduler.Stop()  // stop background work before drain
+})
+
+nox.Hook(hook.Hook_AfterShutdown, func(_ *octanox.Instance) {
+    sqlDB.Close()                    // close DB after drain
+    sentry.Flush(5 * time.Second)    // flush telemetry
+})
+```
+
+### OAuth2 State Store (opt-in)
+
+`StateMap` and `StringStateMap` have been replaced by the `OAuthStateStore` interface. The default `MemoryStateStore` behaves identically to the old types — **no changes needed for single-instance apps**.
+
+For multi-instance deployments, use `SetStateStore()` with a `FuncStateStore`:
+
+```go
+store := auth.NewFuncStateStore(setFn, popFn)
+authenticator.SetStateStore(store)
+```
+
+### New Environment Variables
+
+| Variable | Description |
+|----------|-------------|
+| `NOX__SHUTDOWN_TIMEOUT` | HTTP drain timeout in seconds (default: 30) |
+| `PORT` | Listen port (default: 8080) |

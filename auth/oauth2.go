@@ -21,7 +21,7 @@ type OAuth2BearerAuthenticator struct {
 	loginSuccessRedirect string
 	secret               []byte
 	exp                  int64
-	stateStore OAuthStateStore
+	stateStore           OAuthStateStore
 	// Optional OIDC ID token validation
 	validateIDToken bool
 	oidcIssuer      string
@@ -61,9 +61,9 @@ func NewOAuth2BearerAuthenticator(cfg OAuth2Config) *OAuth2BearerAuthenticator {
 			RedirectURL:  cfg.Domain + cfg.BasePath + "/oauth2/callback",
 			Scopes:       cfg.Scopes,
 		},
-		secret: []byte(cfg.Secret),
+		secret:     []byte(cfg.Secret),
 		stateStore: NewMemoryStateStore(),
-		exp:    86400, // Default 1 day
+		exp:        86400, // Default 1 day
 	}
 }
 
@@ -135,11 +135,23 @@ func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 	// Generate a state and PKCE pair
 	state := uuid.NewString()
 	ctx := c.Request.Context()
-	a.stateStore.Set(ctx, "s:"+state, "1", 300*time.Second)
+	if err := a.stateStore.Set(ctx, "s:"+state, "1", 300*time.Second); err != nil {
+		a.redirectAuthError(c, "state_store_failed", "Failed to start OAuth login")
+		return
+	}
 	verifier, challenge := GeneratePKCE()
-	a.stateStore.Set(ctx, "p:"+state, verifier, 600*time.Second)
+	if err := a.stateStore.Set(ctx, "p:"+state, verifier, 600*time.Second); err != nil {
+		_, _ = a.stateStore.Pop(ctx, "s:"+state)
+		a.redirectAuthError(c, "state_store_failed", "Failed to start OAuth login")
+		return
+	}
 	nonce := GenerateNonce()
-	a.stateStore.Set(ctx, "n:"+state, nonce, 600*time.Second)
+	if err := a.stateStore.Set(ctx, "n:"+state, nonce, 600*time.Second); err != nil {
+		_, _ = a.stateStore.Pop(ctx, "s:"+state)
+		_, _ = a.stateStore.Pop(ctx, "p:"+state)
+		a.redirectAuthError(c, "state_store_failed", "Failed to start OAuth login")
+		return
+	}
 
 	// Request authorization code with PKCE (S256)
 	url := a.config.AuthCodeURL(state,
@@ -151,6 +163,10 @@ func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 	)
 
 	c.Redirect(302, url)
+}
+
+func (a *OAuth2BearerAuthenticator) redirectAuthError(c *gin.Context, code, description string) {
+	c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape(code)+"&error_description="+url.QueryEscape(description))
 }
 
 func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {

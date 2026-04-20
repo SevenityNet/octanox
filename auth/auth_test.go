@@ -17,6 +17,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/sevenitynet/octanox/model"
+	"golang.org/x/oauth2"
 )
 
 // Mock user for testing
@@ -25,7 +26,7 @@ type mockUser struct {
 	roles []string
 }
 
-func (m *mockUser) ID() uuid.UUID       { return m.id }
+func (m *mockUser) ID() uuid.UUID { return m.id }
 func (m *mockUser) HasRole(r string) bool {
 	for _, role := range m.roles {
 		if role == r {
@@ -40,6 +41,10 @@ type mockUserProvider struct {
 	users       map[string]*mockUser
 	apiKeyUsers map[string]*mockUser
 	idUsers     map[uuid.UUID]*mockUser
+}
+
+type mockOAuth2Provider struct {
+	user *mockUser
 }
 
 func newMockUserProvider() *mockUserProvider {
@@ -80,6 +85,17 @@ func (m *mockUserProvider) addUser(username, password string, user *mockUser) {
 func (m *mockUserProvider) addApiKeyUser(apiKey string, user *mockUser) {
 	m.apiKeyUsers[apiKey] = user
 	m.idUsers[user.id] = user
+}
+
+func (m *mockOAuth2Provider) ProvideForLogin(string) (model.User, error) {
+	return m.user, nil
+}
+
+func (m *mockOAuth2Provider) ProvideByID(id uuid.UUID) (model.User, error) {
+	if m.user != nil && m.user.id == id {
+		return m.user, nil
+	}
+	return nil, nil
 }
 
 func init() {
@@ -405,6 +421,44 @@ func TestFuncStateStore(t *testing.T) {
 	val, _ = store.Pop(ctx, "k")
 	if val != "" {
 		t.Errorf("expected empty after second Pop, got %s", val)
+	}
+}
+
+func TestOAuth2BearerAuthenticator_LoginRedirectsWhenStateStoreFails(t *testing.T) {
+	auth := NewOAuth2BearerAuthenticator(OAuth2Config{
+		Provider:             &mockOAuth2Provider{user: &mockUser{id: uuid.New()}},
+		Endpoint:             oauth2.Endpoint{AuthURL: "https://idp.example.com/auth", TokenURL: "https://idp.example.com/token"},
+		ClientID:             "client-id",
+		ClientSecret:         "client-secret",
+		Domain:               "https://api.example.com",
+		BasePath:             "/auth",
+		LoginSuccessRedirect: "https://app.example.com/login-success",
+		Secret:               "secret",
+	})
+	auth.SetStateStore(NewFuncStateStore(
+		func(context.Context, string, string, time.Duration) error {
+			return context.DeadlineExceeded
+		},
+		func(context.Context, string) (string, error) {
+			return "", nil
+		},
+	))
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/auth/login", nil)
+
+	auth.login(c)
+
+	if w.Code != http.StatusFound {
+		t.Fatalf("expected redirect status, got %d", w.Code)
+	}
+	location := w.Header().Get("Location")
+	if !strings.Contains(location, "https://app.example.com/login-success") {
+		t.Fatalf("expected redirect to frontend error URL, got %s", location)
+	}
+	if !strings.Contains(location, "error=state_store_failed") {
+		t.Fatalf("expected state store error in redirect, got %s", location)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -60,7 +61,28 @@ func TestCORS_AllowAll(t *testing.T) {
 	}
 }
 
-func TestCORS_SpecificOrigin(t *testing.T) {
+func TestCORS_AllowedOrigin(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.Request.Header.Set("Origin", "https://allowed.com")
+
+	cors(c)
+
+	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "https://allowed.com" {
+		t.Errorf("expected echoed origin https://allowed.com, got %q", origin)
+	}
+	if w.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Error("expected Allow-Credentials: true for allowed origin")
+	}
+}
+
+func TestCORS_DisallowedOrigin(t *testing.T) {
 	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
 	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
 
@@ -73,9 +95,92 @@ func TestCORS_SpecificOrigin(t *testing.T) {
 
 	cors(c)
 
-	origin := w.Header().Get("Access-Control-Allow-Origin")
-	if origin != "https://allowed.com" {
-		t.Errorf("expected origin https://allowed.com, got %s", origin)
+	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "" {
+		t.Errorf("expected no Allow-Origin for disallowed origin, got %q", origin)
+	}
+	if w.Header().Get("Access-Control-Allow-Credentials") != "" {
+		t.Error("expected no Allow-Credentials for disallowed origin")
+	}
+}
+
+func TestCORS_MultipleOrigins(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://a.com, https://b.com ,https://c.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.Request.Header.Set("Origin", "https://b.com")
+
+	cors(c)
+
+	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "https://b.com" {
+		t.Errorf("expected echoed origin https://b.com, got %q", origin)
+	}
+}
+
+func TestCORS_WildcardWithCredentialsReflectsOrigin(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "*")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.Request.Header.Set("Origin", "https://example.com")
+
+	cors(c)
+
+	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "https://example.com" {
+		t.Errorf("expected reflected origin https://example.com, got %q", origin)
+	}
+	if w.Header().Get("Access-Control-Allow-Credentials") != "true" {
+		t.Error("expected Allow-Credentials: true with reflected wildcard origin")
+	}
+}
+
+func TestCORS_VaryOriginAlwaysPresent(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.Request.Header.Set("Origin", "https://other.com")
+
+	cors(c)
+
+	if vary := w.Header().Get("Vary"); vary != "Origin" {
+		t.Errorf("expected Vary: Origin even for disallowed origin, got %q", vary)
+	}
+}
+
+func TestCORS_PreflightBeforeAuth(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodOptions, "/test", nil)
+	c.Request.Header.Set("Origin", "https://allowed.com")
+
+	cors(c)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for preflight, got %d", w.Code)
+	}
+	if !c.IsAborted() {
+		t.Error("expected preflight to abort before downstream handlers")
+	}
+	if origin := w.Header().Get("Access-Control-Allow-Origin"); origin != "https://allowed.com" {
+		t.Errorf("expected preflight to echo allowed origin, got %q", origin)
 	}
 }
 
@@ -126,6 +231,87 @@ func TestCORS_Headers(t *testing.T) {
 	expose := w.Header().Get("Access-Control-Expose-Headers")
 	if expose == "" {
 		t.Error("expected Expose-Headers header")
+	}
+}
+
+func TestCORS_NegativeOrigins(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	for _, origin := range []string{
+		"http://allowed.com",       // scheme mismatch
+		"https://allowed.com:8443", // port mismatch
+		"https://allowed.com.evil", // suffix
+		"https://evilallowed.com",  // substring/prefix
+	} {
+		w := httptest.NewRecorder()
+		c, _ := gin.CreateTestContext(w)
+		c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+		c.Request.Header.Set("Origin", origin)
+
+		cors(c)
+
+		if got := w.Header().Get("Access-Control-Allow-Origin"); got != "" {
+			t.Errorf("origin %q must not be allowed, got ACAO %q", origin, got)
+		}
+	}
+}
+
+func TestCORS_PreflightAbortsBeforeDownstream(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	downstreamRan := false
+	engine := gin.New()
+	engine.Use(CORS())
+	engine.Use(func(c *gin.Context) { downstreamRan = true; c.AbortWithStatus(http.StatusUnauthorized) })
+	engine.Any("/x", func(c *gin.Context) { c.Status(http.StatusOK) })
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodOptions, "/x", nil)
+	req.Header.Set("Origin", "https://allowed.com")
+	engine.ServeHTTP(w, req)
+
+	if downstreamRan {
+		t.Error("downstream auth middleware ran during OPTIONS preflight")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("expected 200 for preflight, got %d", w.Code)
+	}
+
+	downstreamRan = false
+	w2 := httptest.NewRecorder()
+	req2 := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req2.Header.Set("Origin", "https://allowed.com")
+	engine.ServeHTTP(w2, req2)
+
+	if !downstreamRan {
+		t.Error("downstream middleware should run for a non-preflight request")
+	}
+}
+
+func TestCORS_PreservesExistingVary(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.Writer.Header().Set("Vary", "Accept-Encoding")
+	c.Request.Header.Set("Origin", "https://allowed.com")
+
+	cors(c)
+
+	vary := strings.Join(w.Header().Values("Vary"), ", ")
+	if !strings.Contains(vary, "Accept-Encoding") {
+		t.Errorf("pre-existing Vary value dropped, got %q", vary)
+	}
+	if !strings.Contains(vary, "Origin") {
+		t.Errorf("Vary: Origin not added, got %q", vary)
 	}
 }
 

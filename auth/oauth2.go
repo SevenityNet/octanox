@@ -36,6 +36,10 @@ type OAuth2BearerAuthenticator struct {
 	onLogout func(*gin.Context)
 	// Optional callback invoked after user resolution but before the JWT is signed.
 	onLogin func(*gin.Context, model.User) (map[string]any, error)
+	// Bounds outbound token-exchange/OIDC HTTP; 0 uses defaultOAuthHTTPTimeout.
+	httpTimeout time.Duration
+	// Optional base client whose transport is preserved; nil uses http.DefaultClient.
+	httpClient *http.Client
 }
 
 // OAuth2Config holds the configuration for creating an OAuth2BearerAuthenticator.
@@ -77,6 +81,18 @@ func (a *OAuth2BearerAuthenticator) SetOnCookieAuthEnabled(callback func()) {
 // SetExp sets the expiration time for the token in seconds.
 func (a *OAuth2BearerAuthenticator) SetExp(exp int64) {
 	a.exp = exp
+}
+
+// SetHTTPTimeout bounds outbound token-exchange and OIDC discovery/JWKS calls; a non-positive value keeps the 10s default.
+func (a *OAuth2BearerAuthenticator) SetHTTPTimeout(d time.Duration) *OAuth2BearerAuthenticator {
+	a.httpTimeout = d
+	return a
+}
+
+// SetHTTPClient supplies a base client for outbound OAuth/OIDC calls; octanox preserves its transport/redirect/jar and only layers the timeout on top.
+func (a *OAuth2BearerAuthenticator) SetHTTPClient(c *http.Client) *OAuth2BearerAuthenticator {
+	a.httpClient = c
+	return a
 }
 
 // Method returns the authentication method.
@@ -214,7 +230,10 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	// Retrieve expected nonce for this state (may be empty if not used)
 	expectedNonce, _ := a.stateStore.Pop(ctx, "n:"+state)
 
-	token, err := a.config.Exchange(context.Background(), code,
+	exchangeCtx, cancel := context.WithTimeout(c.Request.Context(), a.effectiveTimeout())
+	defer cancel()
+	exchangeCtx = context.WithValue(exchangeCtx, oauth2.HTTPClient, boundedHTTPClient(a.httpClient, a.httpTimeout))
+	token, err := a.config.Exchange(exchangeCtx, code,
 		oauth2.SetAuthURLParam("code_verifier", verifier),
 	)
 	if err != nil {
@@ -226,7 +245,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	if a.validateIDToken {
 		if raw := token.Extra("id_token"); raw != nil {
 			idToken, _ := raw.(string)
-			if err := ValidateIDTokenWithIssuer(idToken, a.oidcIssuer, a.config.ClientID, expectedNonce); err != nil {
+			if err := validateIDTokenWithIssuer(c.Request.Context(), boundedHTTPClient(a.httpClient, a.httpTimeout), idToken, a.oidcIssuer, a.config.ClientID, expectedNonce); err != nil {
 				c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("invalid_id_token")+"&error_description="+url.QueryEscape("Invalid ID token"))
 				return
 			}
@@ -283,7 +302,7 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	c.Redirect(302, a.loginSuccessRedirect+"?token="+jwt)
 }
 
-// logout clears the authentication cookie, invokes the OnLogout hook, and returns success.
+// logout queues the cookie deletion first so it survives a hook that writes a response, then runs OnLogout (which reads c.Request).
 func (a *OAuth2BearerAuthenticator) logout(c *gin.Context) {
 	if a.useCookies {
 		c.SetSameSite(http.SameSiteLaxMode)
@@ -301,6 +320,14 @@ func (a *OAuth2BearerAuthenticator) logout(c *gin.Context) {
 		a.onLogout(c)
 	}
 	c.JSON(200, gin.H{"message": "Logged out successfully"})
+}
+
+// effectiveTimeout returns the configured outbound HTTP timeout, or the default when unset.
+func (a *OAuth2BearerAuthenticator) effectiveTimeout() time.Duration {
+	if a.httpTimeout <= 0 {
+		return defaultOAuthHTTPTimeout
+	}
+	return a.httpTimeout
 }
 
 // EnableOIDCValidation enforces validation of ID token against the given issuer using JWKS.
@@ -329,8 +356,7 @@ func (a *OAuth2BearerAuthenticator) EnableCookieAuth(cookieName, cookieDomain st
 	return a
 }
 
-// OnLogout registers a callback invoked during the logout handler, after the access
-// cookie is cleared. Use this to clear additional cookies (e.g., refresh, image token).
+// OnLogout registers a callback invoked after the access-cookie deletion is queued; it reads the incoming c.Request to revoke the session or clear extra cookies, and the deletion survives even if the hook writes a response.
 func (a *OAuth2BearerAuthenticator) OnLogout(fn func(*gin.Context)) *OAuth2BearerAuthenticator {
 	a.onLogout = fn
 	return a

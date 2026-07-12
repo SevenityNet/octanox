@@ -1,10 +1,12 @@
 package auth
 
 import (
+	"context"
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"io"
 	"math/big"
 	"net/http"
 	"strings"
@@ -12,6 +14,54 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 )
+
+// defaultOAuthHTTPTimeout bounds every outbound OAuth/OIDC call so a stalled upstream cannot hold a handler open.
+const defaultOAuthHTTPTimeout = 10 * time.Second
+
+// oidcMaxResponseBytes caps discovery/JWKS JSON reads; a JWKS with dozens of RSA keys stays well under 1 MiB.
+const oidcMaxResponseBytes = 1 << 20
+
+// boundedHTTPClient layers only a timeout onto base's transport so a host's custom transport/redirect/jar are preserved.
+func boundedHTTPClient(base *http.Client, timeout time.Duration) *http.Client {
+	if timeout <= 0 {
+		timeout = defaultOAuthHTTPTimeout
+	}
+	if base == nil {
+		base = http.DefaultClient
+	}
+	transport := base.Transport
+	if transport == nil {
+		transport = http.DefaultTransport
+	}
+	return &http.Client{
+		Transport:     transport,
+		CheckRedirect: base.CheckRedirect,
+		Jar:           base.Jar,
+		Timeout:       timeout,
+	}
+}
+
+// fetchJSONBounded GETs url with the given client and decodes a body-capped JSON response into dst.
+func fetchJSONBounded(ctx context.Context, client *http.Client, url string, dst any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// Read one byte past the cap so an oversized body is an explicit error, not a truncated-JSON decode failure.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, oidcMaxResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if int64(len(data)) > oidcMaxResponseBytes {
+		return errors.New("oauth: response body exceeds size limit")
+	}
+	return json.Unmarshal(data, dst)
+}
 
 type oidcDiscovery struct {
 	JWKSURI string `json:"jwks_uri"`
@@ -33,15 +83,15 @@ type jwksResponse struct {
 
 // ValidateIDTokenWithIssuer validates an OIDC ID token against the given issuer using JWKS discovery.
 func ValidateIDTokenWithIssuer(idToken string, issuer string, clientID string, expectedNonce string) error {
+	return validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), idToken, issuer, clientID, expectedNonce)
+}
+
+// validateIDTokenWithIssuer runs discovery + JWKS validation over the supplied bounded client and context.
+func validateIDTokenWithIssuer(ctx context.Context, client *http.Client, idToken string, issuer string, clientID string, expectedNonce string) error {
 	// Fetch discovery
 	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
-	resp, err := http.Get(discoveryURL)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
 	var disc oidcDiscovery
-	if err := json.NewDecoder(resp.Body).Decode(&disc); err != nil {
+	if err := fetchJSONBounded(ctx, client, discoveryURL, &disc); err != nil {
 		return err
 	}
 	if disc.Issuer == "" || disc.JWKSURI == "" {
@@ -49,13 +99,8 @@ func ValidateIDTokenWithIssuer(idToken string, issuer string, clientID string, e
 	}
 
 	// Fetch JWKS
-	resp2, err := http.Get(disc.JWKSURI)
-	if err != nil {
-		return err
-	}
-	defer resp2.Body.Close()
 	var jwks jwksResponse
-	if err := json.NewDecoder(resp2.Body).Decode(&jwks); err != nil {
+	if err := fetchJSONBounded(ctx, client, disc.JWKSURI, &jwks); err != nil {
 		return err
 	}
 

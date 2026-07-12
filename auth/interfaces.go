@@ -25,6 +25,14 @@ type OAuth2UserProvider interface {
 	ProvideByID(id uuid.UUID) (model.User, error)
 }
 
+// OAuth2ClaimsUserProvider is an optional interface an OAuth2UserProvider may implement to
+// validate custom JWT claims (e.g. an active session id) during per-request authentication.
+type OAuth2ClaimsUserProvider interface {
+	// ProvideByIDWithClaims resolves the user for the token subject and validates its claims in a single call.
+	// It must return an error (rejecting the request) if the claims are no longer valid.
+	ProvideByIDWithClaims(id uuid.UUID, claims map[string]any) (model.User, error)
+}
+
 // Authenticator is an interface that defines the authentication module.
 type Authenticator interface {
 	// Method returns the authentication method.

@@ -34,6 +34,8 @@ type OAuth2BearerAuthenticator struct {
 	onCookieAuthEnabled func()
 	// Optional callback invoked during logout (e.g., to clear additional cookies)
 	onLogout func(*gin.Context)
+	// Optional callback invoked after user resolution but before the JWT is signed.
+	onLogin func(*gin.Context, model.User) (map[string]any, error)
 }
 
 // OAuth2Config holds the configuration for creating an OAuth2BearerAuthenticator.
@@ -110,9 +112,14 @@ func (a *OAuth2BearerAuthenticator) Authenticate(c *gin.Context) (model.User, er
 		return nil, nil
 	}
 
-	userID := a.extractToken(tokenString)
+	userID, claims := a.extractToken(tokenString)
 	if userID == nil {
 		return nil, nil
+	}
+
+	// Prefer the claims-aware provider so custom claims (e.g. session id) are validated in the same query.
+	if cp, ok := a.provider.(OAuth2ClaimsUserProvider); ok {
+		return cp.ProvideByIDWithClaims(*userID, claims)
 	}
 
 	user, err := a.provider.ProvideByID(*userID)
@@ -240,9 +247,20 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 		return
 	}
 
-	jwt, err := a.createToken(user)
+	var extraClaims map[string]any
+	if a.onLogin != nil {
+		extraClaims, err = a.onLogin(c, user)
+		if err != nil {
+			a.redirectAuthError(c, "login_hook_failed", "Login failed")
+			return
+		}
+	}
+
+	jwt, err := a.createToken(user, extraClaims)
 	if err != nil {
-		panic("octanox: failed to create token")
+		// Host-supplied claims can be unserializable; fail login cleanly instead of a 500.
+		a.redirectAuthError(c, "token_creation_failed", "Login failed")
+		return
 	}
 
 	// Cookie-based auth: set HTTP-only cookie and redirect without token in URL
@@ -318,6 +336,14 @@ func (a *OAuth2BearerAuthenticator) OnLogout(fn func(*gin.Context)) *OAuth2Beare
 	return a
 }
 
+// OnLogin registers a callback invoked after the user is resolved but before the JWT is signed.
+// The returned map is merged into the token as custom claims (reserved claims cannot be overridden),
+// and a non-nil error aborts the login. Use it to create a session and return its id as a claim.
+func (a *OAuth2BearerAuthenticator) OnLogin(fn func(*gin.Context, model.User) (map[string]any, error)) *OAuth2BearerAuthenticator {
+	a.onLogin = fn
+	return a
+}
+
 // SetStateStore sets a custom OAuthStateStore for storing OAuth2 state, PKCE verifiers, and nonces.
 // Use this to share state across multiple instances (e.g., with Redis via FuncStateStore).
 // By default, an in-memory store is used which only works for single-instance deployments.
@@ -326,22 +352,26 @@ func (a *OAuth2BearerAuthenticator) SetStateStore(store OAuthStateStore) *OAuth2
 	return a
 }
 
-func (a *OAuth2BearerAuthenticator) createToken(user model.User) (string, error) {
+func (a *OAuth2BearerAuthenticator) createToken(user model.User, extraClaims map[string]any) (string, error) {
 	currTime := time.Now().Unix()
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.MapClaims{
-		"iss": "Octanox Auth",
-		"aud": "octanox",
-		"sub": user.ID(),
-		"exp": time.Now().Add(time.Second * time.Duration(a.exp)).Unix(),
-		"iat": currTime,
-		"nbf": currTime,
-		"jti": uuid.New().String(),
-	})
+	claims := jwt.MapClaims{}
+	// Host claims are merged first; reserved registered claims below always win.
+	for k, v := range extraClaims {
+		claims[k] = v
+	}
+	claims["iss"] = "Octanox Auth"
+	claims["aud"] = "octanox"
+	claims["sub"] = user.ID()
+	claims["exp"] = time.Now().Add(time.Second * time.Duration(a.exp)).Unix()
+	claims["iat"] = currTime
+	claims["nbf"] = currTime
+	claims["jti"] = uuid.New().String()
 
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(a.secret)
 }
 
-func (a *OAuth2BearerAuthenticator) extractToken(tokenString string) *uuid.UUID {
+func (a *OAuth2BearerAuthenticator) extractToken(tokenString string) (*uuid.UUID, map[string]any) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
@@ -350,22 +380,27 @@ func (a *OAuth2BearerAuthenticator) extractToken(tokenString string) *uuid.UUID 
 		return a.secret, nil
 	})
 	if err != nil {
-		return nil
+		return nil, nil
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 		subClaim, ok := claims["sub"]
 		if !ok {
-			return nil
+			return nil, nil
 		}
 
-		subject, err := uuid.Parse(subClaim.(string))
+		subStr, ok := subClaim.(string)
+		if !ok {
+			return nil, nil
+		}
+
+		subject, err := uuid.Parse(subStr)
 		if err != nil {
-			return nil
+			return nil, nil
 		}
 
-		return &subject
+		return &subject, map[string]any(claims)
 	}
 
-	return nil
+	return nil, nil
 }

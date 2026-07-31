@@ -27,8 +27,7 @@ import (
 	"github.com/sevenitynet/octanox/serialize"
 )
 
-// Re-exports for backwards compatibility.
-// These types are re-exported for convenience and will remain available forever.
+// Re-exports kept for backwards compatibility; they remain available forever.
 type (
 	// User is the interface that defines the authenticated user model.
 	User = model.User
@@ -73,15 +72,13 @@ type Instance struct {
 	routes []router.Route
 	// serializers is a map of serializers to their respective functions.
 	serializers serialize.Registry
-	// useCookieAuth is a flag that indicates whether cookie-based authentication is enabled.
-	// This is used by the TypeScript code generator to include credentials: 'include' in fetch calls.
+	// useCookieAuth makes the TypeScript generator emit credentials: 'include' in fetch calls.
 	useCookieAuth bool
 	// shutdownTimeout is the maximum time to wait for HTTP connections to drain during shutdown.
 	shutdownTimeout time.Duration
 }
 
-// New creates a new instance of the Octanox framework. If an instance already exists, it will return the existing instance.
-// This won't start the Octanox runtime, you need to call Run() on the instance to start the runtime.
+// New returns the singleton Instance, creating it if needed; call Run() to start the runtime.
 func New() *Instance {
 	if Current != nil {
 		return Current
@@ -150,8 +147,13 @@ func (i *Instance) ErrorHandler(f func(error)) {
 	i.errorHandlers = append(i.errorHandlers, f)
 }
 
-// SetShutdownTimeout sets the maximum time to wait for HTTP connections to drain during shutdown.
-// Default is 30 seconds. Can also be set via NOX__SHUTDOWN_TIMEOUT environment variable.
+// ExtraCORSHeaders appends app-specific headers to the default CORS allow/expose lists; call before Serve.
+func (i *Instance) ExtraCORSHeaders(allow []string, expose []string) *Instance {
+	middleware.ExtraCORSHeaders(allow, expose)
+	return i
+}
+
+// SetShutdownTimeout sets the HTTP drain timeout (default 30s; also settable via NOX__SHUTDOWN_TIMEOUT).
 func (i *Instance) SetShutdownTimeout(d time.Duration) *Instance {
 	i.shutdownTimeout = d
 	return i
@@ -280,10 +282,7 @@ func (i *Instance) Authenticate(provider interface{}) *AuthenticatorBuilder {
 	return &AuthenticatorBuilder{i, provider}
 }
 
-// Bearer creates a new BearerAuthenticator with the given secret and plugs it into the Authenticator.
-// The basePath is the base path for the authentication routes.
-// The secret is the secret key used to sign the JWT token.
-// Defaults to 1 day for the token expiration time.
+// Bearer plugs a BearerAuthenticator (JWT signed with secret, 1-day expiry) into the instance, registering routes under basePath.
 func (b *AuthenticatorBuilder) Bearer(secret, basePath string) *auth.BearerAuthenticator {
 	userProvider, ok := b.provider.(auth.UserProvider)
 	if !ok {
@@ -299,15 +298,7 @@ func (b *AuthenticatorBuilder) Bearer(secret, basePath string) *auth.BearerAuthe
 	return bearer
 }
 
-// BearerOAuth2 creates a new OAuth2BearerAuthenticator with the given OAuth2 parameters and plugs it into the Authenticator.
-// The basePath is the base path for the authentication routes.
-// The clientId is the OAuth2 client ID.
-// The clientSecret is the OAuth2 client secret.
-// The oauth2Endpoint is the OAuth2 endpoint.
-// The scopes is the list of scopes to request.
-// The domain is the domain of this application. The domain must not have a trailing slash. The domain should contain any prefix
-// The loginSuccessRedirect is the URL to redirect to after a successful login.
-// The secret is the secret key used to sign the JWT token.
+// BearerOAuth2 plugs an OAuth2BearerAuthenticator into the instance; domain must include any prefix and have no trailing slash.
 func (b *AuthenticatorBuilder) BearerOAuth2(oauth2Endpoint oauth2.Endpoint, scopes []string, clientId, clientSecret, domain, loginSuccessRedirect, secret, basePath string) *auth.OAuth2BearerAuthenticator {
 	userProvider, ok := b.provider.(auth.OAuth2UserProvider)
 	if !ok {

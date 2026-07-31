@@ -257,8 +257,6 @@ This generates a TypeScript client with typed functions for all registered route
 | Variable | Description |
 |----------|-------------|
 | `NOX__CORS_ALLOWED_ORIGINS` | CORS allowed origins (`*` for all) |
-| `NOX__CORS_EXTRA_ALLOWED_HEADERS` | Comma-separated headers appended to the default `Access-Control-Allow-Headers` list |
-| `NOX__CORS_EXTRA_EXPOSE_HEADERS` | Comma-separated headers appended to the default `Access-Control-Expose-Headers` list |
 | `NOX__DRY_RUN` | Enable dry-run mode for code generation |
 | `NOX__CLIENT_DIR` | Output directory for generated TypeScript |
 | `NOX__GEN_OMIT_URL` | URL prefix to omit from generated function names |

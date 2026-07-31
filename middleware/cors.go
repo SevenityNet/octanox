@@ -7,11 +7,21 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+var corsAllowHeaders = "Authorization, Content-Type, Baggage, Accept, Sentry-Trace"
+var corsExposeHeaders = "Authorization, Content-Type"
+
+// ExtraCORSHeaders appends app-specific headers to the default allow/expose lists; call before serving.
+func ExtraCORSHeaders(allow []string, expose []string) {
+	if len(allow) > 0 {
+		corsAllowHeaders += ", " + strings.Join(allow, ", ")
+	}
+	if len(expose) > 0 {
+		corsExposeHeaders += ", " + strings.Join(expose, ", ")
+	}
+}
+
 // CORS handles CORS headers; allowed origins come from NOX__CORS_ALLOWED_ORIGINS (comma-separated).
 func CORS() gin.HandlerFunc {
-	allowHeaders := appendExtraHeaders("Authorization, Content-Type, Baggage, Accept, Sentry-Trace, X-App-Version", "NOX__CORS_EXTRA_ALLOWED_HEADERS")
-	exposeHeaders := appendExtraHeaders("Authorization, Content-Type", "NOX__CORS_EXTRA_EXPOSE_HEADERS")
-
 	var allowed []string
 	wildcard := false
 	for _, o := range strings.Split(os.Getenv("NOX__CORS_ALLOWED_ORIGINS"), ",") {
@@ -50,8 +60,8 @@ func CORS() gin.HandlerFunc {
 		}
 
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, PATCH, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", allowHeaders)
-		c.Writer.Header().Set("Access-Control-Expose-Headers", exposeHeaders)
+		c.Writer.Header().Set("Access-Control-Allow-Headers", corsAllowHeaders)
+		c.Writer.Header().Set("Access-Control-Expose-Headers", corsExposeHeaders)
 
 		// Answer preflight here, before any downstream auth middleware could reject it.
 		if c.Request.Method == "OPTIONS" {
@@ -61,11 +71,4 @@ func CORS() gin.HandlerFunc {
 
 		c.Next()
 	}
-}
-
-func appendExtraHeaders(defaults, envKey string) string {
-	if extra := strings.TrimSpace(os.Getenv(envKey)); extra != "" {
-		return defaults + ", " + extra
-	}
-	return defaults
 }

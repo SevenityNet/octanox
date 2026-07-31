@@ -7,8 +7,7 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-// CORS returns a middleware that handles CORS headers.
-// It reads NOX__CORS_ALLOWED_ORIGINS (comma-separated) from environment.
+// CORS handles CORS headers; allowed origins come from NOX__CORS_ALLOWED_ORIGINS (comma-separated).
 func CORS() gin.HandlerFunc {
 	var allowed []string
 	wildcard := false
@@ -48,7 +47,7 @@ func CORS() gin.HandlerFunc {
 		}
 
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, PATCH, POST, PUT, DELETE, OPTIONS")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Baggage, Accept, Sentry-Trace")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, Baggage, Accept, Sentry-Trace, X-App-Version")
 		c.Writer.Header().Set("Access-Control-Expose-Headers", "Authorization, Content-Type")
 
 		// Answer preflight here, before any downstream auth middleware could reject it.

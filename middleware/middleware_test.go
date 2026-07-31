@@ -61,6 +61,31 @@ func TestCORS_AllowAll(t *testing.T) {
 	}
 }
 
+func TestCORS_ExtraHeaders(t *testing.T) {
+	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "*")
+	os.Setenv("NOX__CORS_EXTRA_ALLOWED_HEADERS", "X-Custom-One, X-Custom-Two")
+	os.Setenv("NOX__CORS_EXTRA_EXPOSE_HEADERS", "X-Trace-Id")
+	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")
+	defer os.Unsetenv("NOX__CORS_EXTRA_ALLOWED_HEADERS")
+	defer os.Unsetenv("NOX__CORS_EXTRA_EXPOSE_HEADERS")
+
+	cors := CORS()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodGet, "/test", nil)
+	c.Request.Header.Set("Origin", "https://example.com")
+
+	cors(c)
+
+	if got := w.Header().Get("Access-Control-Allow-Headers"); got != "Authorization, Content-Type, Baggage, Accept, Sentry-Trace, X-App-Version, X-Custom-One, X-Custom-Two" {
+		t.Errorf("unexpected Allow-Headers: %q", got)
+	}
+	if got := w.Header().Get("Access-Control-Expose-Headers"); got != "Authorization, Content-Type, X-Trace-Id" {
+		t.Errorf("unexpected Expose-Headers: %q", got)
+	}
+}
+
 func TestCORS_AllowedOrigin(t *testing.T) {
 	os.Setenv("NOX__CORS_ALLOWED_ORIGINS", "https://allowed.com")
 	defer os.Unsetenv("NOX__CORS_ALLOWED_ORIGINS")

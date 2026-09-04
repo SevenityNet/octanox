@@ -261,6 +261,10 @@ This generates a TypeScript client with typed functions for all registered route
 | `NOX__CLIENT_DIR` | Output directory for generated TypeScript |
 | `NOX__GEN_OMIT_URL` | URL prefix to omit from generated function names |
 | `NOX__SHUTDOWN_TIMEOUT` | HTTP drain timeout in seconds (default: 30) |
+| `NOX__READ_HEADER_TIMEOUT` | Seconds a client may take to send request headers (default: 30) |
+| `NOX__IDLE_TIMEOUT` | Seconds a keep-alive connection may sit idle between requests (default: 120) |
+| `NOX__BODY_IDLE_TIMEOUT` | Seconds a request body may stall without progress before the read fails (default: 60) |
+| `NOX__BODY_DRAIN_GRACE` | Seconds net/http may spend draining a body a handler never finished reading (default: 2) |
 | `PORT` | Listen port (default: 8080) |
 
 ## Version

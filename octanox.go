@@ -75,7 +75,11 @@ type Instance struct {
 	// useCookieAuth makes the TypeScript generator emit credentials: 'include' in fetch calls.
 	useCookieAuth bool
 	// shutdownTimeout is the maximum time to wait for HTTP connections to drain during shutdown.
-	shutdownTimeout time.Duration
+	shutdownTimeout   time.Duration
+	readHeaderTimeout time.Duration
+	idleTimeout       time.Duration
+	bodyIdleTimeout   time.Duration
+	bodyDrainGrace    time.Duration
 }
 
 // New returns the singleton Instance, creating it if needed; call Run() to start the runtime.
@@ -87,9 +91,9 @@ func New() *Instance {
 	ginEngine := gin.New()
 
 	Current = &Instance{
-		SubRouter: router.NewSubRouter(&ginEngine.RouterGroup),
-		Gin:       ginEngine,
-		hooks:     make(map[hook.Hook][]func(*Instance)),
+		SubRouter:       router.NewSubRouter(&ginEngine.RouterGroup),
+		Gin:             ginEngine,
+		hooks:           make(map[hook.Hook][]func(*Instance)),
 		errorHandlers:   make([]func(error), 0),
 		isDebug:         gin.Mode() == gin.DebugMode,
 		isDryRun:        os.Getenv("NOX__DRY_RUN") == "true",
@@ -98,11 +102,11 @@ func New() *Instance {
 		shutdownTimeout: 30 * time.Second,
 	}
 
-	if t := os.Getenv("NOX__SHUTDOWN_TIMEOUT"); t != "" {
-		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
-			Current.shutdownTimeout = time.Duration(secs) * time.Second
-		}
-	}
+	Current.shutdownTimeout = envSeconds("NOX__SHUTDOWN_TIMEOUT", Current.shutdownTimeout)
+	Current.readHeaderTimeout = envSeconds("NOX__READ_HEADER_TIMEOUT", 30*time.Second)
+	Current.idleTimeout = envSeconds("NOX__IDLE_TIMEOUT", 120*time.Second)
+	Current.bodyIdleTimeout = envSeconds("NOX__BODY_IDLE_TIMEOUT", 60*time.Second)
+	Current.bodyDrainGrace = envSeconds("NOX__BODY_DRAIN_GRACE", 2*time.Second)
 
 	// Wire up function variables to break circular dependencies
 	router.IsDryRunFunc = func() bool { return Current.isDryRun }
@@ -124,6 +128,8 @@ func New() *Instance {
 
 	Current.emitHook(hook.Hook_Init)
 
+	// First in the chain so every later rejection, auth included, still leaves the body bounded.
+	Current.Gin.Use(middleware.RequestBodyDeadline(Current.bodyIdleTimeout, Current.bodyDrainGrace))
 	Current.Gin.Use(middleware.CORS())
 	Current.Gin.Use(middleware.SecurityHeaders())
 	Current.Gin.Use(middleware.Logger())
@@ -157,6 +163,16 @@ func (i *Instance) ExtraCORSHeaders(allow []string, expose []string) *Instance {
 func (i *Instance) SetShutdownTimeout(d time.Duration) *Instance {
 	i.shutdownTimeout = d
 	return i
+}
+
+// Positive whole seconds only; anything else keeps the default.
+func envSeconds(name string, def time.Duration) time.Duration {
+	if t := os.Getenv(name); t != "" {
+		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
+			return time.Duration(secs) * time.Second
+		}
+	}
+	return def
 }
 
 // Run starts the Octanox runtime. This function will block the current goroutine.
@@ -222,9 +238,12 @@ func (i *Instance) startServer() *http.Server {
 	i.emitHook(hook.Hook_Start)
 
 	addr := resolveAddr()
+	// No ReadTimeout or WriteTimeout: both would cancel long streaming handlers; bodies are bounded per request by RequestBodyDeadline instead.
 	srv := &http.Server{
-		Addr:    addr,
-		Handler: i.Gin,
+		Addr:              addr,
+		Handler:           i.Gin,
+		ReadHeaderTimeout: i.readHeaderTimeout,
+		IdleTimeout:       i.idleTimeout,
 	}
 
 	go func() {

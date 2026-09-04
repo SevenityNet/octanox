@@ -548,7 +548,140 @@ func TestRequestBodyDeadlineDoesNotReuseAConnectionAfterAnIncompleteClose(t *tes
 		t.Fatalf("write second request: %v", err)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
-	if second, err := http.ReadResponse(reader, nil); err == nil {
+	second, err := http.ReadResponse(reader, nil)
+	if err == nil {
 		t.Fatalf("server answered a second request (status %d) on a connection with unread body bytes", second.StatusCode)
+	}
+	requireClosed(t, err)
+}
+
+// http.ReadResponse reports a closed connection as unexpected EOF; a timeout would mean the server is still holding it open.
+func requireClosed(t *testing.T, err error) {
+	t.Helper()
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		t.Fatalf("second request timed out instead of the server closing the connection: %v", err)
+	}
+	if !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("second request err = %v, want a closed connection", err)
+	}
+}
+
+// expectNoReuse sends a valid second request on conn and requires the server to have closed it.
+func expectNoReuse(t *testing.T, conn net.Conn, reader *bufio.Reader) {
+	t.Helper()
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: test\r\n\r\n"); err != nil {
+		t.Fatalf("write second request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	second, err := http.ReadResponse(reader, nil)
+	if err == nil {
+		t.Fatalf("server answered a second request (status %d) on a connection with unread body bytes", second.StatusCode)
+	}
+	requireClosed(t, err)
+}
+
+func TestRequestBodyDeadlineNoReuseAfterExpectContinueClose(t *testing.T) {
+	srv := newDeadlineServer(t, func(c *gin.Context) {
+		if _, err := c.Request.Body.Read(make([]byte, 1)); err != nil {
+			c.String(http.StatusBadRequest, "read: %v", err)
+			return
+		}
+		_ = c.Request.Body.Close()
+		c.Writer.WriteHeader(http.StatusAccepted)
+		_, _ = c.Writer.WriteString("closed")
+	})
+	conn := dialRaw(t, srv)
+	reader := bufio.NewReader(conn)
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 400000\r\nExpect: 100-continue\r\n\r\n"); err != nil {
+		t.Fatalf("write headers: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if interim, err := http.ReadResponse(reader, nil); err != nil || interim.StatusCode != http.StatusContinue {
+		t.Fatalf("expected 100 Continue, got %v %v", interim, err)
+	}
+	if _, err := io.WriteString(conn, "x"); err != nil {
+		t.Fatalf("write first byte: %v", err)
+	}
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil || resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("response = %v %v, want 202", resp, err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	expectNoReuse(t, conn, reader)
+}
+
+func fullDuplexLargeBodyHandler(replaceRequest bool) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if replaceRequest {
+			c.Request = c.Request.WithContext(c.Request.Context())
+		}
+		if err := http.NewResponseController(c.Writer).EnableFullDuplex(); err != nil {
+			c.String(http.StatusInternalServerError, "full duplex: %v", err)
+			return
+		}
+		if _, err := c.Request.Body.Read(make([]byte, 1)); err != nil {
+			c.String(http.StatusBadRequest, "read: %v", err)
+			return
+		}
+		c.Writer.WriteHeader(http.StatusAccepted)
+		_, _ = c.Writer.WriteString("partial")
+		c.Writer.Flush()
+	}
+}
+
+func TestRequestBodyDeadlineNoReuseAfterFullDuplexWithIncompleteBody(t *testing.T) {
+	for name, replace := range map[string]bool{"plain": false, "requestReplacedWithContext": true} {
+		t.Run(name, func(t *testing.T) {
+			srv := newDeadlineServer(t, fullDuplexLargeBodyHandler(replace))
+			conn := dialRaw(t, srv)
+			reader := bufio.NewReader(conn)
+			if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 400000\r\n\r\nx"); err != nil {
+				t.Fatalf("write request: %v", err)
+			}
+			_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			resp, err := http.ReadResponse(reader, nil)
+			if err != nil || resp.StatusCode != http.StatusAccepted {
+				t.Fatalf("response = %v %v, want 202", resp, err)
+			}
+			_, _ = io.Copy(io.Discard, resp.Body)
+			expectNoReuse(t, conn, reader)
+		})
+	}
+}
+
+func TestRequestBodyDeadlineHandsMultipartFormBackForCleanup(t *testing.T) {
+	// net/http removes multipart temp files from its own request, so a form parsed on the handler's copy must reach it.
+	gin.SetMode(gin.TestMode)
+	var serverReq *http.Request
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		serverReq = c.Request
+		// The recorder cannot take a read deadline, so the middleware would otherwise skip wrapping entirely.
+		c.Writer = &recordingWriter{ResponseWriter: c.Writer}
+		c.Next()
+	})
+	engine.Use(RequestBodyDeadline(testIdle, testGrace))
+	engine.POST("/", func(c *gin.Context) {
+		if c.Request == serverReq {
+			c.String(http.StatusInternalServerError, "handler saw the server request, middleware did not wrap")
+			return
+		}
+		if _, err := c.FormFile("f"); err != nil {
+			c.String(http.StatusBadRequest, "form: %v", err)
+			return
+		}
+		c.Status(http.StatusNoContent)
+	})
+	body := "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n"
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if serverReq.MultipartForm == nil || len(serverReq.MultipartForm.File["f"]) != 1 {
+		t.Fatalf("server request did not receive the parsed multipart form for cleanup")
 	}
 }

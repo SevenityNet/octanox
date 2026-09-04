@@ -34,12 +34,17 @@ func RequestBodyDeadlineFunc(resolve func() (idle, drainGrace time.Duration)) gi
 				return
 			}
 		}
-		original := c.Request.Body
-		c.Request.Body = &deadlineBody{ReadCloser: original, guard: guard, req: c.Request}
+		// net/http keeps type-asserting its own request's Body (drain, early-close reuse checks before Go 1.27), so the handler gets a shallow copy carrying the wrapper and the server's request is never touched.
+		serverReq := c.Request
+		handlerReq := serverReq.WithContext(serverReq.Context())
+		handlerReq.Body = &deadlineBody{ReadCloser: serverReq.Body, guard: guard}
+		c.Request = handlerReq
 		c.Writer = &deadlineWriter{ResponseWriter: c.Writer, guard: guard}
 		c.Next()
-		// net/http before 1.27 type-asserts Request.Body to decide drain and reuse, so it must see its own body again once the handler is done.
-		c.Request.Body = original
+		// Multipart temp files are removed by net/http from its own request, so a form parsed on the copy must be handed back.
+		if serverReq.MultipartForm == nil && c.Request.MultipartForm != nil {
+			serverReq.MultipartForm = c.Request.MultipartForm
+		}
 		guard.boundDrain()
 	}
 }
@@ -104,7 +109,6 @@ func (g *bodyDeadline) clearAfterRead(eof bool) {
 type deadlineBody struct {
 	io.ReadCloser
 	guard *bodyDeadline
-	req   *http.Request
 }
 
 // The deadline is live only while blocked waiting for the client, so server-side work between reads never counts as idle time; EOF must clear rather than renew because net/http starts its disconnect read there.
@@ -118,10 +122,9 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Closing an unfinished body makes net/http drain it synchronously right here, and a Read racing the Close must not replace or clear that grace; the original body is restored first so an early close is visible to net/http's reuse check on Go 1.26 and older.
+// Closing an unfinished body makes net/http drain it synchronously right here, and a Read racing the Close must not replace or clear that grace.
 func (b *deadlineBody) Close() error {
 	b.guard.beginClose()
-	b.req.Body = b.ReadCloser
 	return b.ReadCloser.Close()
 }
 

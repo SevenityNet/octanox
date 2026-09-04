@@ -401,12 +401,27 @@ func (b *scriptedBody) Read(p []byte) (int, error) {
 func (b *scriptedBody) Close() error { return nil }
 
 func TestRequestBodyDeadlineClearsAfterEveryReadResultAndAtEOF(t *testing.T) {
-	// net/http's own EOF clear masks the wrapper's on a real socket, so the deadline sequence is recorded directly.
+	// net/http's own EOF clear masks the wrapper's on a real socket, so the deadline sequence is recorded directly through a handler chain.
 	gin.SetMode(gin.TestMode)
-	recorder := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(recorder)
-	rw := &recordingWriter{ResponseWriter: c.Writer}
-	c.Writer = rw
+	var rw *recordingWriter
+	var readErrs []error
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		rw = &recordingWriter{ResponseWriter: c.Writer}
+		c.Writer = rw
+		c.Next()
+	})
+	engine.Use(RequestBodyDeadline(testIdle, testGrace))
+	engine.POST("/", func(c *gin.Context) {
+		buf := make([]byte, 8)
+		for i := 0; i < 4; i++ {
+			_, err := c.Request.Body.Read(buf)
+			readErrs = append(readErrs, err)
+		}
+		_, err := c.Request.Body.Read(buf[:0])
+		readErrs = append(readErrs, err)
+		c.Status(http.StatusNoContent)
+	})
 	body := &scriptedBody{}
 	body.results = append(body.results,
 		struct {
@@ -426,29 +441,15 @@ func TestRequestBodyDeadlineClearsAfterEveryReadResultAndAtEOF(t *testing.T) {
 			err error
 		}{0, io.EOF},
 	)
-	c.Request = httptest.NewRequest(http.MethodPost, "/", body)
-	c.Request.ContentLength = -1
+	req := httptest.NewRequest(http.MethodPost, "/", body)
+	req.ContentLength = -1
+	engine.ServeHTTP(httptest.NewRecorder(), req)
 
-	RequestBodyDeadline(testIdle, testGrace)(c)
-	buf := make([]byte, 8)
-	if _, err := c.Request.Body.Read(buf); err != nil {
-		t.Fatalf("first read: %v", err)
+	if len(readErrs) != 5 || readErrs[0] != nil || readErrs[1] != nil || !errors.Is(readErrs[2], io.ErrUnexpectedEOF) || !errors.Is(readErrs[3], io.EOF) {
+		t.Fatalf("read errors = %v", readErrs)
 	}
-	if n, err := c.Request.Body.Read(buf); n != 0 || err != nil {
-		t.Fatalf("no-progress read = %d, %v", n, err)
-	}
-	if _, err := c.Request.Body.Read(buf); !errors.Is(err, io.ErrUnexpectedEOF) {
-		t.Fatalf("second read err = %v", err)
-	}
-	if _, err := c.Request.Body.Read(buf); !errors.Is(err, io.EOF) {
-		t.Fatalf("third read err = %v", err)
-	}
-	if _, err := c.Request.Body.Read(buf[:0]); err == nil {
-		t.Fatalf("zero-length read after EOF should not succeed")
-	}
-
-	// entry arm, the post-chain drain grace (no handler ran), then arm/clear per read including the no-progress one, with EOF's clear last; the zero-length read arms nothing.
-	want := []bool{true, true, true, false, true, false, true, false, true, false}
+	// entry arm, then arm/clear per read including the no-progress one, with EOF's clear last; the zero-length read arms nothing and the consumed body needs no post-handler grace.
+	want := []bool{true, true, false, true, false, true, false, true, false}
 	if len(rw.deadlines) != len(want) {
 		t.Fatalf("deadline calls = %d (%v), want %d", len(rw.deadlines), rw.deadlines, len(want))
 	}
@@ -516,5 +517,38 @@ func TestRequestBodyDeadlineKeepsAliveAfterASuccessfulCloseDrain(t *testing.T) {
 		if resp.StatusCode != http.StatusOK || resp.Close {
 			t.Fatalf("request %d: status = %d close = %v, want a reusable 200", i, resp.StatusCode, resp.Close)
 		}
+	}
+}
+
+func TestRequestBodyDeadlineDoesNotReuseAConnectionAfterAnIncompleteClose(t *testing.T) {
+	// Reusing the connection here would let the unread body bytes be parsed as the next request.
+	srv := newDeadlineServer(t, func(c *gin.Context) {
+		if _, err := c.Request.Body.Read(make([]byte, 1)); err != nil {
+			c.String(http.StatusBadRequest, "read: %v", err)
+			return
+		}
+		_ = c.Request.Body.Close()
+		c.String(http.StatusAccepted, "closed")
+	})
+	conn := dialRaw(t, srv)
+	reader := bufio.NewReader(conn)
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 400000\r\n\r\nx"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("first response: %v", err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("first status = %d, want 202", resp.StatusCode)
+	}
+	if _, err := io.WriteString(conn, "GET / HTTP/1.1\r\nHost: test\r\n\r\n"); err != nil {
+		t.Fatalf("write second request: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if second, err := http.ReadResponse(reader, nil); err == nil {
+		t.Fatalf("server answered a second request (status %d) on a connection with unread body bytes", second.StatusCode)
 	}
 }

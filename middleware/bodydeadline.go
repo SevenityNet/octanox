@@ -34,9 +34,12 @@ func RequestBodyDeadlineFunc(resolve func() (idle, drainGrace time.Duration)) gi
 				return
 			}
 		}
-		c.Request.Body = &deadlineBody{ReadCloser: c.Request.Body, guard: guard}
+		original := c.Request.Body
+		c.Request.Body = &deadlineBody{ReadCloser: original, guard: guard, req: c.Request}
 		c.Writer = &deadlineWriter{ResponseWriter: c.Writer, guard: guard}
 		c.Next()
+		// net/http before 1.27 type-asserts Request.Body to decide drain and reuse, so it must see its own body again once the handler is done.
+		c.Request.Body = original
 		guard.boundDrain()
 	}
 }
@@ -101,6 +104,7 @@ func (g *bodyDeadline) clearAfterRead(eof bool) {
 type deadlineBody struct {
 	io.ReadCloser
 	guard *bodyDeadline
+	req   *http.Request
 }
 
 // The deadline is live only while blocked waiting for the client, so server-side work between reads never counts as idle time; EOF must clear rather than renew because net/http starts its disconnect read there.
@@ -114,9 +118,10 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Closing an unfinished body makes net/http drain it synchronously right here, and a Read racing the Close must not replace or clear that grace.
+// Closing an unfinished body makes net/http drain it synchronously right here, and a Read racing the Close must not replace or clear that grace; the original body is restored first so an early close is visible to net/http's reuse check on Go 1.26 and older.
 func (b *deadlineBody) Close() error {
 	b.guard.beginClose()
+	b.req.Body = b.ReadCloser
 	return b.ReadCloser.Close()
 }
 

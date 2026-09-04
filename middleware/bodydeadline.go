@@ -51,6 +51,7 @@ type bodyDeadline struct {
 	hijacked   bool
 	fullDuplex bool
 	drainArmed bool
+	closing    bool
 }
 
 // net/http drains an unread HTTP/1 body before the first header write and again after the handler, so both moments get the same short budget.
@@ -77,7 +78,7 @@ func (g *bodyDeadline) boundDrainOnWrite() {
 func (g *bodyDeadline) armIdle() {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.consumed || g.hijacked {
+	if g.consumed || g.hijacked || g.closing {
 		return
 	}
 	// A pending drain grace is superseded once the handler reads again, so the post-handler fallback must be free to re-arm it.
@@ -88,7 +89,7 @@ func (g *bodyDeadline) armIdle() {
 func (g *bodyDeadline) clearAfterRead(eof bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if g.hijacked || g.consumed {
+	if g.hijacked || g.consumed || g.closing {
 		return
 	}
 	if eof {
@@ -113,10 +114,20 @@ func (b *deadlineBody) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// Closing an unfinished body makes net/http drain it synchronously right here, before any writer hook or post-handler fallback could bound it.
+// Closing an unfinished body makes net/http drain it synchronously right here, and a Read racing the Close must not replace or clear that grace.
 func (b *deadlineBody) Close() error {
-	b.guard.boundDrain()
+	b.guard.beginClose()
 	return b.ReadCloser.Close()
+}
+
+func (g *bodyDeadline) beginClose() {
+	g.mu.Lock()
+	closing := g.closing
+	g.closing = true
+	g.mu.Unlock()
+	if !closing {
+		g.boundDrain()
+	}
 }
 
 type deadlineWriter struct {

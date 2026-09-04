@@ -416,6 +416,10 @@ func TestRequestBodyDeadlineClearsAfterEveryReadResultAndAtEOF(t *testing.T) {
 		struct {
 			n   int
 			err error
+		}{0, nil},
+		struct {
+			n   int
+			err error
 		}{2, io.ErrUnexpectedEOF},
 		struct {
 			n   int
@@ -430,6 +434,9 @@ func TestRequestBodyDeadlineClearsAfterEveryReadResultAndAtEOF(t *testing.T) {
 	if _, err := c.Request.Body.Read(buf); err != nil {
 		t.Fatalf("first read: %v", err)
 	}
+	if n, err := c.Request.Body.Read(buf); n != 0 || err != nil {
+		t.Fatalf("no-progress read = %d, %v", n, err)
+	}
 	if _, err := c.Request.Body.Read(buf); !errors.Is(err, io.ErrUnexpectedEOF) {
 		t.Fatalf("second read err = %v", err)
 	}
@@ -440,14 +447,74 @@ func TestRequestBodyDeadlineClearsAfterEveryReadResultAndAtEOF(t *testing.T) {
 		t.Fatalf("zero-length read after EOF should not succeed")
 	}
 
-	// entry arm, the post-chain drain grace (no handler ran), then arm/clear per read with EOF's clear last; the zero-length read arms nothing.
-	want := []bool{true, true, true, false, true, false, true, false}
+	// entry arm, the post-chain drain grace (no handler ran), then arm/clear per read including the no-progress one, with EOF's clear last; the zero-length read arms nothing.
+	want := []bool{true, true, true, false, true, false, true, false, true, false}
 	if len(rw.deadlines) != len(want) {
 		t.Fatalf("deadline calls = %d (%v), want %d", len(rw.deadlines), rw.deadlines, len(want))
 	}
 	for i, armed := range want {
 		if got := !rw.deadlines[i].IsZero(); got != armed {
 			t.Fatalf("deadline call %d armed = %v, want %v (sequence %v)", i, got, armed, rw.deadlines)
+		}
+	}
+}
+
+func TestRequestBodyDeadlineCloseGraceSurvivesARacingRead(t *testing.T) {
+	// A Read that completes with progress while Close is pending must not clear the close grace; the client feeds one late chunk then stalls.
+	srv := newDeadlineServerWith(t, 5*time.Second, testGrace, func(c *gin.Context) {
+		readDone := make(chan error, 1)
+		go func() {
+			_, err := c.Request.Body.Read(make([]byte, 16))
+			readDone <- err
+		}()
+		time.Sleep(testGrace / 4)
+		closeErr := c.Request.Body.Close()
+		select {
+		case <-readDone:
+		case <-time.After(3 * time.Second):
+			c.String(http.StatusInternalServerError, "read never returned")
+			return
+		}
+		c.String(http.StatusAccepted, "close=%v", closeErr)
+	})
+	conn := dialRaw(t, srv)
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n"); err != nil {
+		t.Fatalf("write headers: %v", err)
+	}
+	started := time.Now()
+	time.Sleep(testGrace / 2)
+	if _, err := io.WriteString(conn, "5\r\nlate!\r\n"); err != nil {
+		t.Fatalf("write late chunk: %v", err)
+	}
+	resp := readStatus(t, conn, 3*time.Second)
+	if resp.StatusCode != http.StatusAccepted || time.Since(started) > 2*time.Second {
+		t.Fatalf("status = %d after %v, racing read disturbed the close grace", resp.StatusCode, time.Since(started))
+	}
+}
+
+func TestRequestBodyDeadlineKeepsAliveAfterASuccessfulCloseDrain(t *testing.T) {
+	srv := newDeadlineServer(t, func(c *gin.Context) {
+		if _, err := c.Request.Body.Read(make([]byte, 1)); err != nil {
+			c.String(http.StatusBadRequest, "read: %v", err)
+			return
+		}
+		_ = c.Request.Body.Close()
+		c.String(http.StatusOK, "ok")
+	})
+	conn := dialRaw(t, srv)
+	reader := bufio.NewReader(conn)
+	for i := 0; i < 2; i++ {
+		if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 5\r\n\r\nhello"); err != nil {
+			t.Fatalf("request %d: %v", i, err)
+		}
+		_ = conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		resp, err := http.ReadResponse(reader, nil)
+		if err != nil {
+			t.Fatalf("request %d: read response: %v (connection not reused after a close-drained body)", i, err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		if resp.StatusCode != http.StatusOK || resp.Close {
+			t.Fatalf("request %d: status = %d close = %v, want a reusable 200", i, resp.StatusCode, resp.Close)
 		}
 	}
 }

@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"io"
 	"net"
@@ -37,18 +38,18 @@ func RequestBodyDeadlineFunc(resolve func() (idle, drainGrace time.Duration)) gi
 		// net/http keeps type-asserting its own request's Body (drain, early-close reuse checks before Go 1.27), so the handler gets a shallow copy carrying the wrapper and the server's request is never touched.
 		serverReq := c.Request
 		// Undeclared chunked trailers are written into the server request's map, so it must exist before the copy shares it.
-		if serverReq.Trailer == nil && serverReq.ContentLength < 0 {
+		if serverReq.Trailer == nil && serverReq.ProtoMajor == 1 && len(serverReq.TransferEncoding) > 0 && serverReq.TransferEncoding[0] == "chunked" {
 			serverReq.Trailer = http.Header{}
 		}
-		handlerReq := serverReq.WithContext(serverReq.Context())
+		handlerReq := serverReq.WithContext(context.WithValue(serverReq.Context(), lineageKey{}, guard))
 		handlerReq.Body = &deadlineBody{ReadCloser: serverReq.Body, guard: guard}
 		c.Request = handlerReq
 		c.Writer = &deadlineWriter{ResponseWriter: c.Writer, guard: guard}
 		c.Next()
-		// Multipart temp files are removed by net/http from its own request, so a form parsed on the copy must be handed back.
+		// Multipart temp files are removed by net/http from its own request, so a form parsed on the copy (or a request derived from it) must be handed back.
 		if serverReq.MultipartForm == nil {
 			form := handlerReq.MultipartForm
-			if form == nil && c.Request != nil {
+			if form == nil && c.Request != nil && c.Request.Context().Value(lineageKey{}) == guard {
 				form = c.Request.MultipartForm
 			}
 			serverReq.MultipartForm = form
@@ -56,6 +57,9 @@ func RequestBodyDeadlineFunc(resolve func() (idle, drainGrace time.Duration)) gi
 		guard.boundDrain()
 	}
 }
+
+// lineageKey marks contexts derived from the handler copy, so a form on an unrelated replacement request is never adopted for cleanup.
+type lineageKey struct{}
 
 type bodyDeadline struct {
 	mu         sync.Mutex

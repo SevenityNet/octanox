@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -780,4 +781,56 @@ func TestRequestBodyDeadlineHandsBackFormParsedBeforeRequestReplacement(t *testi
 	if serverReq.MultipartForm == nil || len(serverReq.MultipartForm.File["f"]) != 1 {
 		t.Fatalf("form parsed before the request was replaced was not handed back")
 	}
+}
+
+func TestRequestBodyDeadlineMultipartHandBackFollowsRequestLineage(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	body := "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n"
+	run := func(t *testing.T, handler gin.HandlerFunc) *http.Request {
+		var serverReq *http.Request
+		engine := gin.New()
+		engine.Use(func(c *gin.Context) {
+			serverReq = c.Request
+			c.Writer = &recordingWriter{ResponseWriter: c.Writer}
+			c.Next()
+		})
+		engine.Use(RequestBodyDeadline(testIdle, testGrace))
+		engine.POST("/", handler)
+		req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+		req.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+		rec := httptest.NewRecorder()
+		engine.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNoContent {
+			t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+		}
+		return serverReq
+	}
+	t.Run("derived request is adopted", func(t *testing.T) {
+		serverReq := run(t, func(c *gin.Context) {
+			c.Request = c.Request.WithContext(context.WithValue(c.Request.Context(), "k", "v"))
+			if _, err := c.FormFile("f"); err != nil {
+				c.String(http.StatusBadRequest, "form: %v", err)
+				return
+			}
+			c.Status(http.StatusNoContent)
+		})
+		if serverReq.MultipartForm == nil {
+			t.Fatalf("form parsed on a context-derived request was not handed back")
+		}
+	})
+	t.Run("unrelated request is not adopted", func(t *testing.T) {
+		serverReq := run(t, func(c *gin.Context) {
+			other := httptest.NewRequest(http.MethodPost, "/other", strings.NewReader(body))
+			other.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+			if err := other.ParseMultipartForm(1 << 20); err != nil {
+				c.String(http.StatusBadRequest, "parse: %v", err)
+				return
+			}
+			c.Request = other
+			c.Status(http.StatusNoContent)
+		})
+		if serverReq.MultipartForm != nil {
+			t.Fatalf("an unrelated request's form was handed to net/http for removal")
+		}
+	})
 }

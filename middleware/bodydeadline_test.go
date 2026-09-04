@@ -276,3 +276,71 @@ func TestRequestBodyDeadlineReleasesAHijackedConnection(t *testing.T) {
 		t.Fatalf("tunnel reply = %q err = %v, want the echoed line", reply, err)
 	}
 }
+
+func TestRequestBodyDeadlinePostHandlerGraceCoversASilentHandler(t *testing.T) {
+	// The handler never writes, so only the post-handler fallback can bound the drain under a 5s idle budget.
+	srv := newDeadlineServerWith(t, 5*time.Second, testGrace, func(c *gin.Context) {})
+	conn := dialRaw(t, srv)
+	writeChunkedPreamble(t, conn, "partial")
+	started := time.Now()
+	resp := readStatus(t, conn, 3*time.Second)
+	if resp.StatusCode != http.StatusOK || time.Since(started) > 2*time.Second {
+		t.Fatalf("status = %d after %v, silent handler drain was not bounded", resp.StatusCode, time.Since(started))
+	}
+}
+
+func TestRequestBodyDeadlineReArmsGraceAfterAWriteThenPartialRead(t *testing.T) {
+	srv := newDeadlineServerWith(t, 5*time.Second, testGrace, func(c *gin.Context) {
+		c.Writer.WriteHeader(http.StatusAccepted)
+		_, _ = c.Writer.WriteString("started ")
+		if _, err := c.Request.Body.Read(make([]byte, 1)); err != nil {
+			_, _ = c.Writer.WriteString("read: " + err.Error())
+		}
+	})
+	conn := dialRaw(t, srv)
+	writeChunkedPreamble(t, conn, "partial")
+	started := time.Now()
+	resp := readStatus(t, conn, 3*time.Second)
+	if resp.StatusCode != http.StatusAccepted || time.Since(started) > 2*time.Second {
+		t.Fatalf("status = %d after %v, stale drain flag left the remainder draining under the idle budget", resp.StatusCode, time.Since(started))
+	}
+}
+
+func TestRequestBodyDeadlineDoesNotShortenFullDuplexReads(t *testing.T) {
+	// Idle stays generous so only a wrongly armed drain grace could fail the read that the concurrent write races.
+	srv := newDeadlineServerWith(t, 5*time.Second, testGrace, func(c *gin.Context) {
+		if err := http.NewResponseController(c.Writer).EnableFullDuplex(); err != nil {
+			c.String(http.StatusInternalServerError, "full duplex: %v", err)
+			return
+		}
+		wrote := make(chan struct{})
+		go func() {
+			defer close(wrote)
+			time.Sleep(testGrace / 2)
+			c.Writer.WriteHeader(http.StatusOK)
+			_, _ = c.Writer.WriteString("ready\n")
+			c.Writer.Flush()
+		}()
+		data, err := io.ReadAll(c.Request.Body)
+		<-wrote
+		if err != nil {
+			_, _ = c.Writer.WriteString("read: " + err.Error() + "\n")
+			return
+		}
+		_, _ = c.Writer.WriteString(fmt.Sprintf("got %d\n", len(data)))
+	})
+	conn := dialRaw(t, srv)
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nContent-Length: 5\r\n\r\n"); err != nil {
+		t.Fatalf("write headers: %v", err)
+	}
+	// The body arrives well after the concurrent first write, but inside the idle budget.
+	time.Sleep(3 * testGrace)
+	if _, err := io.WriteString(conn, "hello"); err != nil {
+		t.Fatalf("write body: %v", err)
+	}
+	resp := readStatus(t, conn, 3*time.Second)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "got 5") {
+		t.Fatalf("status = %d body = %q, want a completed full-duplex read", resp.StatusCode, body)
+	}
+}

@@ -74,12 +74,12 @@ type Instance struct {
 	serializers serialize.Registry
 	// useCookieAuth makes the TypeScript generator emit credentials: 'include' in fetch calls.
 	useCookieAuth bool
-	// shutdownTimeout is the maximum time to wait for HTTP connections to drain during shutdown.
-	shutdownTimeout   time.Duration
-	readHeaderTimeout time.Duration
-	idleTimeout       time.Duration
-	bodyIdleTimeout   time.Duration
-	bodyDrainGrace    time.Duration
+	// Timeouts carry the app-configured value; an env override, when present, always wins.
+	shutdownTimeout   timeout
+	readHeaderTimeout timeout
+	idleTimeout       timeout
+	bodyIdleTimeout   timeout
+	bodyDrainGrace    timeout
 }
 
 // New returns the singleton Instance, creating it if needed; call Run() to start the runtime.
@@ -91,22 +91,20 @@ func New() *Instance {
 	ginEngine := gin.New()
 
 	Current = &Instance{
-		SubRouter:       router.NewSubRouter(&ginEngine.RouterGroup),
-		Gin:             ginEngine,
-		hooks:           make(map[hook.Hook][]func(*Instance)),
-		errorHandlers:   make([]func(error), 0),
-		isDebug:         gin.Mode() == gin.DebugMode,
-		isDryRun:        os.Getenv("NOX__DRY_RUN") == "true",
-		routes:          make([]router.Route, 0),
-		serializers:     serialize.NewRegistry(),
-		shutdownTimeout: 30 * time.Second,
+		SubRouter:         router.NewSubRouter(&ginEngine.RouterGroup),
+		Gin:               ginEngine,
+		hooks:             make(map[hook.Hook][]func(*Instance)),
+		errorHandlers:     make([]func(error), 0),
+		isDebug:           gin.Mode() == gin.DebugMode,
+		isDryRun:          os.Getenv("NOX__DRY_RUN") == "true",
+		routes:            make([]router.Route, 0),
+		serializers:       serialize.NewRegistry(),
+		shutdownTimeout:   newTimeout("NOX__SHUTDOWN_TIMEOUT", 30*time.Second),
+		readHeaderTimeout: newTimeout("NOX__READ_HEADER_TIMEOUT", 30*time.Second),
+		idleTimeout:       newTimeout("NOX__IDLE_TIMEOUT", 120*time.Second),
+		bodyIdleTimeout:   newTimeout("NOX__BODY_IDLE_TIMEOUT", 60*time.Second),
+		bodyDrainGrace:    newTimeout("NOX__BODY_DRAIN_GRACE", 2*time.Second),
 	}
-
-	Current.shutdownTimeout = envSeconds("NOX__SHUTDOWN_TIMEOUT", Current.shutdownTimeout)
-	Current.readHeaderTimeout = envSeconds("NOX__READ_HEADER_TIMEOUT", 30*time.Second)
-	Current.idleTimeout = envSeconds("NOX__IDLE_TIMEOUT", 120*time.Second)
-	Current.bodyIdleTimeout = envSeconds("NOX__BODY_IDLE_TIMEOUT", 60*time.Second)
-	Current.bodyDrainGrace = envSeconds("NOX__BODY_DRAIN_GRACE", 2*time.Second)
 
 	// Wire up function variables to break circular dependencies
 	router.IsDryRunFunc = func() bool { return Current.isDryRun }
@@ -129,7 +127,9 @@ func New() *Instance {
 	Current.emitHook(hook.Hook_Init)
 
 	// First in the chain so every later rejection, auth included, still leaves the body bounded.
-	Current.Gin.Use(middleware.RequestBodyDeadline(Current.bodyIdleTimeout, Current.bodyDrainGrace))
+	Current.Gin.Use(middleware.RequestBodyDeadlineFunc(func() (time.Duration, time.Duration) {
+		return Current.bodyIdleTimeout.effective(), Current.bodyDrainGrace.effective()
+	}))
 	Current.Gin.Use(middleware.CORS())
 	Current.Gin.Use(middleware.SecurityHeaders())
 	Current.Gin.Use(middleware.Logger())
@@ -159,20 +159,61 @@ func (i *Instance) ExtraCORSHeaders(allow []string, expose []string) *Instance {
 	return i
 }
 
-// SetShutdownTimeout sets the HTTP drain timeout (default 30s; also settable via NOX__SHUTDOWN_TIMEOUT).
+// SetShutdownTimeout sets the HTTP drain timeout (default 30s); NOX__SHUTDOWN_TIMEOUT overrides it when set.
 func (i *Instance) SetShutdownTimeout(d time.Duration) *Instance {
-	i.shutdownTimeout = d
+	i.shutdownTimeout.value = d
 	return i
 }
 
-// Positive whole seconds only; anything else keeps the default.
-func envSeconds(name string, def time.Duration) time.Duration {
+// SetReadHeaderTimeout bounds how long a client may take to send request headers (default 30s); NOX__READ_HEADER_TIMEOUT overrides it when set.
+func (i *Instance) SetReadHeaderTimeout(d time.Duration) *Instance {
+	i.readHeaderTimeout.value = d
+	return i
+}
+
+// SetIdleTimeout bounds how long a keep-alive connection may sit idle between requests (default 120s); NOX__IDLE_TIMEOUT overrides it when set.
+func (i *Instance) SetIdleTimeout(d time.Duration) *Instance {
+	i.idleTimeout.value = d
+	return i
+}
+
+// SetBodyIdleTimeout bounds how long a request body may stall without progress (default 60s); NOX__BODY_IDLE_TIMEOUT overrides it when set.
+func (i *Instance) SetBodyIdleTimeout(d time.Duration) *Instance {
+	i.bodyIdleTimeout.value = d
+	return i
+}
+
+// SetBodyDrainGrace bounds how long net/http may drain a body a handler never finished reading (default 2s); NOX__BODY_DRAIN_GRACE overrides it when set.
+func (i *Instance) SetBodyDrainGrace(d time.Duration) *Instance {
+	i.bodyDrainGrace.value = d
+	return i
+}
+
+type timeout struct {
+	value time.Duration
+	env   time.Duration
+}
+
+func newTimeout(envName string, def time.Duration) timeout {
+	return timeout{value: def, env: envSeconds(envName)}
+}
+
+// Env wins over the app-configured value so an operator can retune a deployment without a rebuild.
+func (t timeout) effective() time.Duration {
+	if t.env > 0 {
+		return t.env
+	}
+	return t.value
+}
+
+// Positive whole seconds only; anything else reads as unset.
+func envSeconds(name string) time.Duration {
 	if t := os.Getenv(name); t != "" {
 		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
 			return time.Duration(secs) * time.Second
 		}
 	}
-	return def
+	return 0
 }
 
 // Run starts the Octanox runtime. This function will block the current goroutine.
@@ -188,7 +229,7 @@ func (i *Instance) Run() {
 	log.Println("Shutting down...")
 	i.emitHook(hook.Hook_Shutdown)
 
-	drainCtx, drainCancel := context.WithTimeout(context.Background(), i.shutdownTimeout)
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), i.shutdownTimeout.effective())
 	defer drainCancel()
 
 	if err := srv.Shutdown(drainCtx); err != nil {
@@ -242,8 +283,8 @@ func (i *Instance) startServer() *http.Server {
 	srv := &http.Server{
 		Addr:              addr,
 		Handler:           i.Gin,
-		ReadHeaderTimeout: i.readHeaderTimeout,
-		IdleTimeout:       i.idleTimeout,
+		ReadHeaderTimeout: i.readHeaderTimeout.effective(),
+		IdleTimeout:       i.idleTimeout.effective(),
 	}
 
 	go func() {

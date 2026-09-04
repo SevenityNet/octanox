@@ -188,6 +188,19 @@ Or via environment variable:
 NOX__SHUTDOWN_TIMEOUT=60  # seconds
 ```
 
+When both are given, the environment variable wins so an operator can retune a deployment without a rebuild.
+
+## Connection and Body Timeouts
+
+Octanox sets a header read timeout and a keep-alive idle timeout on the HTTP server, and bounds every request body with an idle deadline that renews while data arrives, clears once the body is fully read (long streaming handlers keep their context), and shrinks to a short drain grace when a handler never finished reading. There is deliberately no whole-request read or write timeout, because those cancel long-lived streams. Configure them the same way as the drain timeout, environment winning over code:
+
+```go
+app.SetReadHeaderTimeout(30 * time.Second)
+app.SetIdleTimeout(120 * time.Second)
+app.SetBodyIdleTimeout(60 * time.Second)
+app.SetBodyDrainGrace(2 * time.Second)
+```
+
 ## OAuth2 State Store
 
 By default, OAuth2 state (CSRF tokens, PKCE verifiers, nonces) is stored in memory. For multi-instance deployments, plug in an external store:

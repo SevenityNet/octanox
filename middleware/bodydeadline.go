@@ -11,7 +11,13 @@ import (
 
 // RequestBodyDeadline keeps a client from parking a connection on an unfinished body: the read deadline renews on progress, clears at EOF so long-running handlers keep their context, and drops to drainGrace after a handler that never finished reading so net/http's post-handler drain cannot block forever.
 func RequestBodyDeadline(idle, drainGrace time.Duration) gin.HandlerFunc {
+	return RequestBodyDeadlineFunc(func() (time.Duration, time.Duration) { return idle, drainGrace })
+}
+
+// RequestBodyDeadlineFunc resolves the budgets per request so values configured after registration still apply.
+func RequestBodyDeadlineFunc(resolve func() (idle, drainGrace time.Duration)) gin.HandlerFunc {
 	return func(c *gin.Context) {
+		idle, drainGrace := resolve()
 		if c.Request.ContentLength == 0 || c.Request.Body == nil || c.Request.Body == http.NoBody {
 			c.Next()
 			return

@@ -104,15 +104,19 @@ type deadlineBody struct {
 
 // The deadline is live only while blocked waiting for the client, so server-side work between reads never counts as idle time; EOF must clear rather than renew because net/http starts its disconnect read there.
 func (b *deadlineBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return b.ReadCloser.Read(p)
+	}
 	b.guard.armIdle()
 	n, err := b.ReadCloser.Read(p)
-	switch {
-	case errors.Is(err, io.EOF):
-		b.guard.clearAfterRead(true)
-	case n > 0 && err == nil:
-		b.guard.clearAfterRead(false)
-	}
+	b.guard.clearAfterRead(errors.Is(err, io.EOF))
 	return n, err
+}
+
+// Closing an unfinished body makes net/http drain it synchronously right here, before any writer hook or post-handler fallback could bound it.
+func (b *deadlineBody) Close() error {
+	b.guard.boundDrain()
+	return b.ReadCloser.Close()
 }
 
 type deadlineWriter struct {

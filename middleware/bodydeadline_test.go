@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -342,5 +343,111 @@ func TestRequestBodyDeadlineDoesNotShortenFullDuplexReads(t *testing.T) {
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "got 5") {
 		t.Fatalf("status = %d body = %q, want a completed full-duplex read", resp.StatusCode, body)
+	}
+}
+
+func TestRequestBodyDeadlineBoundsDrainOnExplicitClose(t *testing.T) {
+	// After a partial read cleared the deadline, Close drains synchronously inside the handler; only the Close hook can bound it.
+	for name, close := range map[string]func(c *gin.Context) error{
+		"body":           func(c *gin.Context) error { return c.Request.Body.Close() },
+		"maxBytesReader": func(c *gin.Context) error { return http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20).Close() },
+	} {
+		t.Run(name, func(t *testing.T) {
+			srv := newDeadlineServerWith(t, 5*time.Second, testGrace, func(c *gin.Context) {
+				if _, err := c.Request.Body.Read(make([]byte, 1)); err != nil {
+					c.String(http.StatusBadRequest, "read: %v", err)
+					return
+				}
+				_ = close(c)
+				c.String(http.StatusAccepted, "closed")
+			})
+			conn := dialRaw(t, srv)
+			writeChunkedPreamble(t, conn, "partial")
+			started := time.Now()
+			resp := readStatus(t, conn, 3*time.Second)
+			if resp.StatusCode != http.StatusAccepted || time.Since(started) > 2*time.Second {
+				t.Fatalf("status = %d after %v, Close drained under the idle budget", resp.StatusCode, time.Since(started))
+			}
+		})
+	}
+}
+
+type recordingWriter struct {
+	gin.ResponseWriter
+	deadlines []time.Time
+}
+
+func (w *recordingWriter) SetReadDeadline(d time.Time) error {
+	w.deadlines = append(w.deadlines, d)
+	return nil
+}
+
+type scriptedBody struct {
+	results []struct {
+		n   int
+		err error
+	}
+}
+
+func (b *scriptedBody) Read(p []byte) (int, error) {
+	if len(b.results) == 0 {
+		return 0, io.EOF
+	}
+	r := b.results[0]
+	b.results = b.results[1:]
+	return r.n, r.err
+}
+
+func (b *scriptedBody) Close() error { return nil }
+
+func TestRequestBodyDeadlineClearsAfterEveryReadResultAndAtEOF(t *testing.T) {
+	// net/http's own EOF clear masks the wrapper's on a real socket, so the deadline sequence is recorded directly.
+	gin.SetMode(gin.TestMode)
+	recorder := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(recorder)
+	rw := &recordingWriter{ResponseWriter: c.Writer}
+	c.Writer = rw
+	body := &scriptedBody{}
+	body.results = append(body.results,
+		struct {
+			n   int
+			err error
+		}{3, nil},
+		struct {
+			n   int
+			err error
+		}{2, io.ErrUnexpectedEOF},
+		struct {
+			n   int
+			err error
+		}{0, io.EOF},
+	)
+	c.Request = httptest.NewRequest(http.MethodPost, "/", body)
+	c.Request.ContentLength = -1
+
+	RequestBodyDeadline(testIdle, testGrace)(c)
+	buf := make([]byte, 8)
+	if _, err := c.Request.Body.Read(buf); err != nil {
+		t.Fatalf("first read: %v", err)
+	}
+	if _, err := c.Request.Body.Read(buf); !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("second read err = %v", err)
+	}
+	if _, err := c.Request.Body.Read(buf); !errors.Is(err, io.EOF) {
+		t.Fatalf("third read err = %v", err)
+	}
+	if _, err := c.Request.Body.Read(buf[:0]); err == nil {
+		t.Fatalf("zero-length read after EOF should not succeed")
+	}
+
+	// entry arm, the post-chain drain grace (no handler ran), then arm/clear per read with EOF's clear last; the zero-length read arms nothing.
+	want := []bool{true, true, true, false, true, false, true, false}
+	if len(rw.deadlines) != len(want) {
+		t.Fatalf("deadline calls = %d (%v), want %d", len(rw.deadlines), rw.deadlines, len(want))
+	}
+	for i, armed := range want {
+		if got := !rw.deadlines[i].IsZero(); got != armed {
+			t.Fatalf("deadline call %d armed = %v, want %v (sequence %v)", i, got, armed, rw.deadlines)
+		}
 	}
 }

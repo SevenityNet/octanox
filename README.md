@@ -285,7 +285,7 @@ This generates a TypeScript client with typed functions for all registered route
 ```go
 import "github.com/sevenitynet/octanox"
 
-fmt.Println(octanox.Version) // "1.1.0"
+fmt.Println(octanox.Version) // "1.1.9"
 ```
 
 ## License

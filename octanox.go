@@ -3,6 +3,7 @@ package octanox
 import (
 	"context"
 	"log"
+	"math"
 	"net/http"
 	"os"
 	"os/signal"
@@ -206,10 +207,10 @@ func (t timeout) effective() time.Duration {
 	return t.value
 }
 
-// Positive whole seconds only; anything else reads as unset.
+// Positive whole seconds only; anything else, including a value that would overflow a Duration, reads as unset.
 func envSeconds(name string) time.Duration {
 	if t := os.Getenv(name); t != "" {
-		if secs, err := strconv.Atoi(t); err == nil && secs > 0 {
+		if secs, err := strconv.ParseInt(t, 10, 64); err == nil && secs > 0 && secs <= int64(math.MaxInt64/time.Second) {
 			return time.Duration(secs) * time.Second
 		}
 	}
@@ -255,6 +256,16 @@ func (i *Instance) emitError(err error) {
 	}
 }
 
+// No ReadTimeout or WriteTimeout: both would cancel long streaming handlers; bodies are bounded per request by RequestBodyDeadline instead.
+func (i *Instance) newServer(addr string) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           i.Gin,
+		ReadHeaderTimeout: i.readHeaderTimeout.effective(),
+		IdleTimeout:       i.idleTimeout.effective(),
+	}
+}
+
 func (i *Instance) startServer() *http.Server {
 	i.emitHook(hook.Hook_BeforeStart)
 
@@ -279,13 +290,7 @@ func (i *Instance) startServer() *http.Server {
 	i.emitHook(hook.Hook_Start)
 
 	addr := resolveAddr()
-	// No ReadTimeout or WriteTimeout: both would cancel long streaming handlers; bodies are bounded per request by RequestBodyDeadline instead.
-	srv := &http.Server{
-		Addr:              addr,
-		Handler:           i.Gin,
-		ReadHeaderTimeout: i.readHeaderTimeout.effective(),
-		IdleTimeout:       i.idleTimeout.effective(),
-	}
+	srv := i.newServer(addr)
 
 	go func() {
 		log.Printf("Listening on %s", addr)

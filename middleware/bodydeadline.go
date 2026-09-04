@@ -36,14 +36,22 @@ func RequestBodyDeadlineFunc(resolve func() (idle, drainGrace time.Duration)) gi
 		}
 		// net/http keeps type-asserting its own request's Body (drain, early-close reuse checks before Go 1.27), so the handler gets a shallow copy carrying the wrapper and the server's request is never touched.
 		serverReq := c.Request
+		// Undeclared chunked trailers are written into the server request's map, so it must exist before the copy shares it.
+		if serverReq.Trailer == nil && serverReq.ContentLength < 0 {
+			serverReq.Trailer = http.Header{}
+		}
 		handlerReq := serverReq.WithContext(serverReq.Context())
 		handlerReq.Body = &deadlineBody{ReadCloser: serverReq.Body, guard: guard}
 		c.Request = handlerReq
 		c.Writer = &deadlineWriter{ResponseWriter: c.Writer, guard: guard}
 		c.Next()
 		// Multipart temp files are removed by net/http from its own request, so a form parsed on the copy must be handed back.
-		if serverReq.MultipartForm == nil && c.Request.MultipartForm != nil {
-			serverReq.MultipartForm = c.Request.MultipartForm
+		if serverReq.MultipartForm == nil {
+			form := handlerReq.MultipartForm
+			if form == nil && c.Request != nil {
+				form = c.Request.MultipartForm
+			}
+			serverReq.MultipartForm = form
 		}
 		guard.boundDrain()
 	}

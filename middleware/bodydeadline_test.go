@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -683,5 +684,100 @@ func TestRequestBodyDeadlineHandsMultipartFormBackForCleanup(t *testing.T) {
 	}
 	if serverReq.MultipartForm == nil || len(serverReq.MultipartForm.File["f"]) != 1 {
 		t.Fatalf("server request did not receive the parsed multipart form for cleanup")
+	}
+}
+
+func TestRequestBodyDeadlineExposesUndeclaredChunkedTrailers(t *testing.T) {
+	srv := newDeadlineServer(t, func(c *gin.Context) {
+		if _, err := io.ReadAll(c.Request.Body); err != nil {
+			c.String(http.StatusBadRequest, "read: %v", err)
+			return
+		}
+		c.String(http.StatusOK, "trailer=%s", c.Request.Trailer.Get("X-Checksum"))
+	})
+	conn := dialRaw(t, srv)
+	if _, err := io.WriteString(conn, "POST / HTTP/1.1\r\nHost: test\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\nX-Checksum: abc\r\n\r\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp := readStatus(t, conn, 3*time.Second)
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "trailer=abc" {
+		t.Fatalf("status = %d body = %q, want the undeclared trailer", resp.StatusCode, body)
+	}
+}
+
+func TestRequestBodyDeadlineMultipartTempFileIsRemovedAfterTheResponse(t *testing.T) {
+	var tmpPath string
+	srv := newDeadlineServer(t, func(c *gin.Context) {
+		// A one-byte memory budget forces the part onto disk, which is the case net/http must clean up.
+		if err := c.Request.ParseMultipartForm(1); err != nil {
+			c.String(http.StatusBadRequest, "parse: %v", err)
+			return
+		}
+		fh := c.Request.MultipartForm.File["f"][0]
+		f, err := fh.Open()
+		if err != nil {
+			c.String(http.StatusInternalServerError, "open: %v", err)
+			return
+		}
+		defer f.Close()
+		if osf, ok := f.(*os.File); ok {
+			tmpPath = osf.Name()
+		}
+		c.Status(http.StatusNoContent)
+	})
+	body := "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\nContent-Type: text/plain\r\n\r\nhello there\r\n--b--\r\n"
+	resp, err := http.Post(srv.URL, "multipart/form-data; boundary=b", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("post: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	if tmpPath == "" {
+		t.Fatalf("the part did not spill to disk, test is not exercising cleanup")
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, err := os.Stat(tmpPath); err != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("multipart temp file %s still exists after the response", tmpPath)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestRequestBodyDeadlineHandsBackFormParsedBeforeRequestReplacement(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	var serverReq *http.Request
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		serverReq = c.Request
+		c.Writer = &recordingWriter{ResponseWriter: c.Writer}
+		c.Next()
+	})
+	engine.Use(RequestBodyDeadline(testIdle, testGrace))
+	engine.POST("/", func(c *gin.Context) {
+		if _, err := c.FormFile("f"); err != nil {
+			c.String(http.StatusBadRequest, "form: %v", err)
+			return
+		}
+		// An unrelated replacement must neither lose the parsed form nor hand its own form to net/http.
+		c.Request = httptest.NewRequest(http.MethodGet, "/other", nil)
+		c.Status(http.StatusNoContent)
+	})
+	body := "--b\r\nContent-Disposition: form-data; name=\"f\"; filename=\"f.txt\"\r\nContent-Type: text/plain\r\n\r\nhello\r\n--b--\r\n"
+	req := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "multipart/form-data; boundary=b")
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("status = %d body = %s", rec.Code, rec.Body.String())
+	}
+	if serverReq.MultipartForm == nil || len(serverReq.MultipartForm.File["f"]) != 1 {
+		t.Fatalf("form parsed before the request was replaced was not handed back")
 	}
 }

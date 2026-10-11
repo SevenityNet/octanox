@@ -6,10 +6,10 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"uuid"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"github.com/sevenitynet/octanox/model"
 	"golang.org/x/oauth2"
 )
@@ -156,7 +156,7 @@ func (a *OAuth2BearerAuthenticator) RegisterRoutes(r *gin.RouterGroup) {
 
 func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 	// Generate a state and PKCE pair
-	state := uuid.NewString()
+	state := uuid.New().String()
 	ctx := c.Request.Context()
 	if err := a.stateStore.Set(ctx, "s:"+state, "1", 300*time.Second); err != nil {
 		a.redirectAuthError(c, "state_store_failed", "Failed to start OAuth login")

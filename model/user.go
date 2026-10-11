@@ -1,6 +1,6 @@
 package model
 
-import "github.com/google/uuid"
+import "uuid"
 
 // User is an interface that defines the authenticated user model.
 type User interface {

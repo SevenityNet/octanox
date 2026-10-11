@@ -5,9 +5,9 @@ import (
 	"net/http/httptest"
 	"reflect"
 	"testing"
+	"uuid"
 
 	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/sevenitynet/octanox/ctx"
 	"github.com/sevenitynet/octanox/model"
 	"github.com/sevenitynet/octanox/request"
@@ -19,7 +19,7 @@ type mockUser struct {
 	roles []string
 }
 
-func (m *mockUser) ID() uuid.UUID       { return m.id }
+func (m *mockUser) ID() uuid.UUID { return m.id }
 func (m *mockUser) HasRole(r string) bool {
 	for _, role := range m.roles {
 		if role == r {

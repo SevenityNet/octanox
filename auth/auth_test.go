@@ -12,10 +12,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"uuid"
 
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/google/uuid"
 	"github.com/sevenitynet/octanox/model"
 	"golang.org/x/oauth2"
 )

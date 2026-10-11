@@ -76,6 +76,28 @@ Existing applications do not need to change any imports. The re-exports have zer
 
 ---
 
+## Go 1.27 and the standard library `uuid` package (breaking)
+
+Octanox now requires Go 1.27 and uses the standard library `uuid` package instead of `github.com/google/uuid`. `model.User.ID()`, `UserProvider.ProvideByID`, `OAuth2UserProvider.ProvideByID` and `ProvideByIDWithClaims` take or return `uuid.UUID` from `"uuid"`.
+
+Both types are `[16]byte`, so an application that keeps `github.com/google/uuid` internally converts at the boundary:
+
+```go
+import (
+    stduuid "uuid"
+
+    "github.com/google/uuid"
+)
+
+func (u User) ID() stduuid.UUID { return stduuid.UUID(u.UUID) }
+
+func (p *Provider) ProvideByID(id stduuid.UUID) (octanox.User, error) {
+    return p.find(uuid.UUID(id))
+}
+```
+
+---
+
 ## v1.1.0 Changes
 
 ### Graceful Shutdown (automatic)

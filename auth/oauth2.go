@@ -2,6 +2,7 @@ package auth
 
 import (
 	"context"
+	"crypto/subtle"
 	"net/http"
 	"net/url"
 	"strings"
@@ -40,7 +41,13 @@ type OAuth2BearerAuthenticator struct {
 	httpTimeout time.Duration
 	// Optional base client whose transport is preserved; nil uses http.DefaultClient.
 	httpClient *http.Client
+	// Optional login-initiation cookie that binds the OAuth state to the browser that started the login.
+	stateCookie bool
+	basePath    string
 }
+
+// stateCookieName is the login-initiation cookie set by /login and required by the callback when state binding is enabled.
+const stateCookieName = "octanox_oauth_state"
 
 // OAuth2Config holds the configuration for creating an OAuth2BearerAuthenticator.
 type OAuth2Config struct {
@@ -148,6 +155,7 @@ func (a *OAuth2BearerAuthenticator) Authenticate(c *gin.Context) (model.User, er
 
 // RegisterRoutes registers the OAuth2 endpoints on the given router group.
 func (a *OAuth2BearerAuthenticator) RegisterRoutes(r *gin.RouterGroup) {
+	a.basePath = strings.TrimRight(r.BasePath(), "/")
 	r.GET("/login", a.login)
 	r.GET("/oauth2/callback", a.callback)
 	// Always register logout endpoint for cookie-based auth
@@ -185,7 +193,16 @@ func (a *OAuth2BearerAuthenticator) login(c *gin.Context) {
 		oauth2.SetAuthURLParam("scope", strings.Join(a.config.Scopes, " ")),
 	)
 
+	if a.stateCookie {
+		a.setStateCookie(c, state, 300)
+	}
 	c.Redirect(302, url)
+}
+
+// setStateCookie scopes the state cookie to the callback path; SameSite=Lax still sends it on the IdP's top-level redirect.
+func (a *OAuth2BearerAuthenticator) setStateCookie(c *gin.Context, value string, maxAge int) {
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie(stateCookieName, value, maxAge, a.basePath+"/oauth2/callback", "", strings.HasPrefix(a.config.RedirectURL, "https://"), true)
 }
 
 func (a *OAuth2BearerAuthenticator) redirectAuthError(c *gin.Context, code, description string) {
@@ -214,6 +231,13 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	state := c.Query("state")
 	ctx := c.Request.Context()
 	val, _ := a.stateStore.Pop(ctx, "s:"+state)
+	if a.stateCookie {
+		bound, _ := c.Cookie(stateCookieName)
+		a.setStateCookie(c, "", -1)
+		if state == "" || subtle.ConstantTimeCompare([]byte(bound), []byte(state)) != 1 {
+			val = ""
+		}
+	}
 	if val == "" {
 		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("invalid_state")+"&error_description="+url.QueryEscape("Invalid or expired OAuth state"))
 		return
@@ -242,20 +266,28 @@ func (a *OAuth2BearerAuthenticator) callback(c *gin.Context) {
 	}
 
 	// Optionally validate ID token using OIDC discovery + JWKS
+	var idClaims map[string]any
 	if a.validateIDToken {
 		if raw := token.Extra("id_token"); raw != nil {
 			idToken, _ := raw.(string)
-			if err := validateIDTokenWithIssuer(c.Request.Context(), boundedHTTPClient(a.httpClient, a.httpTimeout), idToken, a.oidcIssuer, a.config.ClientID, expectedNonce); err != nil {
+			claims, err := validateIDTokenWithIssuer(c.Request.Context(), boundedHTTPClient(a.httpClient, a.httpTimeout), idToken, a.oidcIssuer, a.config.ClientID, expectedNonce)
+			if err != nil {
 				c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("invalid_id_token")+"&error_description="+url.QueryEscape("Invalid ID token"))
 				return
 			}
+			idClaims = claims
 		} else {
 			c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("missing_id_token")+"&error_description="+url.QueryEscape("Missing ID token"))
 			return
 		}
 	}
 
-	user, err := a.provider.ProvideForLogin(token.AccessToken)
+	var user model.User
+	if ip, ok := a.provider.(OAuth2IDTokenUserProvider); ok && idClaims != nil {
+		user, err = ip.ProvideForLoginWithIDToken(token.AccessToken, idClaims)
+	} else {
+		user, err = a.provider.ProvideForLogin(token.AccessToken)
+	}
 	if err != nil {
 		c.Redirect(302, a.loginSuccessRedirect+"?error="+url.QueryEscape("login_failed")+"&error_description="+url.QueryEscape("Login failed"))
 		return
@@ -367,6 +399,12 @@ func (a *OAuth2BearerAuthenticator) OnLogout(fn func(*gin.Context)) *OAuth2Beare
 // and a non-nil error aborts the login. Use it to create a session and return its id as a claim.
 func (a *OAuth2BearerAuthenticator) OnLogin(fn func(*gin.Context, model.User) (map[string]any, error)) *OAuth2BearerAuthenticator {
 	a.onLogin = fn
+	return a
+}
+
+// EnableStateCookie binds every OAuth state to an HttpOnly login-initiation cookie, so a callback only completes in the browser that started the login.
+func (a *OAuth2BearerAuthenticator) EnableStateCookie() *OAuth2BearerAuthenticator {
+	a.stateCookie = true
 	return a
 }
 

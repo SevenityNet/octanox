@@ -34,8 +34,7 @@ type OAuth2ClaimsUserProvider interface {
 	ProvideByIDWithClaims(id uuid.UUID, claims map[string]any) (model.User, error)
 }
 
-// OAuth2IDTokenUserProvider is an optional interface an OAuth2UserProvider may implement to receive the validated ID-token claims at login.
-// It is used instead of ProvideForLogin when OIDC validation is enabled, so the provider can compare the ID-token sub with the userinfo sub.
+// OAuth2IDTokenUserProvider optionally replaces ProvideForLogin under OIDC validation, receiving the validated ID-token claims (e.g. to compare sub with userinfo).
 type OAuth2IDTokenUserProvider interface {
 	ProvideForLoginWithIDToken(oauth2AccessToken string, idTokenClaims map[string]any) (model.User, error)
 }

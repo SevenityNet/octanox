@@ -119,6 +119,8 @@ app.Authenticate(&myOAuth2Provider{}).
     EnableCookieAuth("session", ".myapp.com", true)
 ```
 
+`EnableStateCookie()` binds each OAuth state to an HttpOnly login-initiation cookie, so the callback only completes in the browser that started the login (login CSRF protection). With OIDC validation enabled, a provider that also implements `auth.OAuth2IDTokenUserProvider` receives the validated ID-token claims (e.g. `sub`) through `ProvideForLoginWithIDToken` instead of `ProvideForLogin`.
+
 ### Basic Auth
 
 ```go

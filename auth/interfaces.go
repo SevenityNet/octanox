@@ -34,6 +34,11 @@ type OAuth2ClaimsUserProvider interface {
 	ProvideByIDWithClaims(id uuid.UUID, claims map[string]any) (model.User, error)
 }
 
+// OAuth2IDTokenUserProvider optionally replaces ProvideForLogin under OIDC validation, receiving the validated ID-token claims (e.g. to compare sub with userinfo).
+type OAuth2IDTokenUserProvider interface {
+	ProvideForLoginWithIDToken(oauth2AccessToken string, idTokenClaims map[string]any) (model.User, error)
+}
+
 // Authenticator is an interface that defines the authentication module.
 type Authenticator interface {
 	// Method returns the authentication method.

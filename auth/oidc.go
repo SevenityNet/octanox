@@ -83,25 +83,26 @@ type jwksResponse struct {
 
 // ValidateIDTokenWithIssuer validates an OIDC ID token against the given issuer using JWKS discovery.
 func ValidateIDTokenWithIssuer(idToken string, issuer string, clientID string, expectedNonce string) error {
-	return validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), idToken, issuer, clientID, expectedNonce)
+	_, err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), idToken, issuer, clientID, expectedNonce)
+	return err
 }
 
-// validateIDTokenWithIssuer runs discovery + JWKS validation over the supplied bounded client and context.
-func validateIDTokenWithIssuer(ctx context.Context, client *http.Client, idToken string, issuer string, clientID string, expectedNonce string) error {
+// validateIDTokenWithIssuer runs discovery + JWKS validation over the supplied bounded client and context and returns the validated claims.
+func validateIDTokenWithIssuer(ctx context.Context, client *http.Client, idToken string, issuer string, clientID string, expectedNonce string) (jwt.MapClaims, error) {
 	// Fetch discovery
 	discoveryURL := strings.TrimRight(issuer, "/") + "/.well-known/openid-configuration"
 	var disc oidcDiscovery
 	if err := fetchJSONBounded(ctx, client, discoveryURL, &disc); err != nil {
-		return err
+		return nil, err
 	}
 	if disc.Issuer == "" || disc.JWKSURI == "" {
-		return errors.New("invalid discovery document")
+		return nil, errors.New("invalid discovery document")
 	}
 
 	// Fetch JWKS
 	var jwks jwksResponse
 	if err := fetchJSONBounded(ctx, client, disc.JWKSURI, &jwks); err != nil {
-		return err
+		return nil, err
 	}
 
 	// Build kid -> rsa.PublicKey map
@@ -142,23 +143,25 @@ func validateIDTokenWithIssuer(ctx context.Context, client *http.Client, idToken
 		return pub, nil
 	}, jwt.WithAudience(clientID), jwt.WithIssuer(issuer), jwt.WithLeeway(30*time.Second))
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if !token.Valid {
-		return errors.New("invalid token")
+		return nil, errors.New("invalid token")
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return nil, errors.New("invalid token claims")
 	}
 	// Check nonce if expectedNonce provided
 	if expectedNonce != "" {
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			nonceVal, has := claims["nonce"]
-			if !has {
-				return errors.New("missing nonce")
-			}
-			nonceStr, ok2 := nonceVal.(string)
-			if !ok2 || nonceStr != expectedNonce {
-				return errors.New("nonce mismatch")
-			}
+		nonceVal, has := claims["nonce"]
+		if !has {
+			return nil, errors.New("missing nonce")
+		}
+		nonceStr, ok2 := nonceVal.(string)
+		if !ok2 || nonceStr != expectedNonce {
+			return nil, errors.New("nonce mismatch")
 		}
 	}
-	return nil
+	return claims, nil
 }

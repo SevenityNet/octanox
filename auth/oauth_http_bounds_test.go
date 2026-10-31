@@ -60,7 +60,7 @@ func TestValidateIDTokenWithIssuer_DiscoveryTimeout(t *testing.T) {
 	defer close(release)
 
 	start := time.Now()
-	err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 50*time.Millisecond), "tok", server.URL, "client", "")
+	_, err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 50*time.Millisecond), "tok", server.URL, "client", "")
 	if err == nil {
 		t.Fatal("expected timeout error, got nil")
 	}
@@ -82,7 +82,7 @@ func TestValidateIDTokenWithIssuer_JWKSTimeout(t *testing.T) {
 	defer close(release)
 
 	start := time.Now()
-	err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 50*time.Millisecond), "tok", server.URL, "client", "")
+	_, err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 50*time.Millisecond), "tok", server.URL, "client", "")
 	if err == nil {
 		t.Fatal("expected JWKS timeout error, got nil")
 	}
@@ -152,7 +152,7 @@ func TestValidateIDTokenWithIssuer_NearCapAndOversizedJWKS(t *testing.T) {
 	t.Run("near cap succeeds", func(t *testing.T) {
 		server := newServer(oidcMaxResponseBytes - 4096)
 		defer server.Close()
-		if err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), mkToken(server.URL), server.URL, "cid", ""); err != nil {
+		if _, err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), mkToken(server.URL), server.URL, "cid", ""); err != nil {
 			t.Fatalf("expected near-cap JWKS to validate, got: %v", err)
 		}
 	})
@@ -160,7 +160,7 @@ func TestValidateIDTokenWithIssuer_NearCapAndOversizedJWKS(t *testing.T) {
 	t.Run("oversized rejected", func(t *testing.T) {
 		server := newServer(oidcMaxResponseBytes + 4096)
 		defer server.Close()
-		err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), mkToken(server.URL), server.URL, "cid", "")
+		_, err := validateIDTokenWithIssuer(context.Background(), boundedHTTPClient(nil, 0), mkToken(server.URL), server.URL, "cid", "")
 		if err == nil || !strings.Contains(err.Error(), "exceeds size limit") {
 			t.Fatalf("expected oversized-JWKS size-limit error, got: %v", err)
 		}
